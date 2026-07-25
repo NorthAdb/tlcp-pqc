@@ -1,0 +1,11 @@
+﻿# Former remotes after vendoring Tongsuo / pqmagic into this repo
+# (nested .git removed; patches live in tlcp-pqc history going forward)
+#
+# Tongsuo origin:     https://gitcode.com/stella_moment/tongsuo.git
+# Tongsuo old-origin: https://gitcode.com/tongsuo-org/Tongsuo.git
+# Last known HEAD:    350104b6
+#
+# pqmagic origin:     https://gitee.com/pqcrypto/pqmagic.git
+# Last known HEAD:    9613aa3
+#
+# To refresh from upstream later: clone upstream elsewhere, diff/copy into these trees.

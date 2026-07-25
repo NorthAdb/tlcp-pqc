@@ -1,0 +1,148 @@
+cmake_minimum_required(VERSION 3.10)
+
+set(CMAKE_PROJECT_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
+set(CURRENT_BUILD_DIR ${CMAKE_BINARY_DIR}/sig/ml_dsa/std)
+
+# Include headers.
+include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_PROJECT_ROOT} ${CMAKE_PROJECT_ROOT}/include ${CMAKE_PROJECT_ROOT}/utils)
+
+# Find all source code.
+file(GLOB ML_DSA_SOURCES_ORIGIN ${CMAKE_CURRENT_SOURCE_DIR}/*.c)
+
+set(ML_DSA_SOURCES "")
+foreach(SOURCE_PATH ${ML_DSA_SOURCES_ORIGIN})
+    # Only check if the file name contains any keyword, ignore the file path.
+    string(REGEX REPLACE ".*\\/" "" SOURCE ${SOURCE_PATH})
+    
+    # Check if current file related to shake hash.
+    if(SOURCE MATCHES "shake")
+        # Add it to path only when USE_SHAKE is set.
+        if(USE_SHAKE)
+            list(APPEND ML_DSA_SOURCES ${SOURCE_PATH}) 
+        endif()
+    else()
+        list(APPEND ML_DSA_SOURCES ${SOURCE_PATH}) 
+    endif()
+
+endforeach()
+
+# Compile all mode into objects.
+# Then add static lib for each modes.
+set(TARGET_OBJECTS_ALL "")
+foreach(MODE ${ML_DSA_MODES})
+    # Set as object
+    add_library(ml_dsa_objects_${MODE} OBJECT ${ML_DSA_SOURCES}) 
+
+    # Set ml_dsa mode.
+    target_compile_definitions(ml_dsa_objects_${MODE} PRIVATE ML_DSA_MODE=${MODE})
+    if(USE_SHAKE)
+    target_compile_definitions(ml_dsa_objects_${MODE} PRIVATE USE_SHAKE)
+    endif()
+
+    # If we need to compile each algorithm components into shared/static library
+    if(COMPILE_COMPONENT_LIBRARY)
+    # Add static lib.
+    add_library(ml_dsa_static_${MODE} STATIC $<TARGET_OBJECTS:ml_dsa_objects_${MODE}>)
+    endif()
+    
+    list(APPEND TARGET_OBJECTS_ALL $<TARGET_OBJECTS:ml_dsa_objects_${MODE}>)
+    list(APPEND SUPPORT_ALG_OBJECT_TARGET $<TARGET_OBJECTS:ml_dsa_objects_${MODE}>)
+    
+
+endforeach()
+
+# Pass to parents
+set(SUPPORT_ALG_OBJECT_TARGET ${SUPPORT_ALG_OBJECT_TARGET} PARENT_SCOPE)
+
+# If we need to compile each algorithm components into shared/static library
+if(COMPILE_COMPONENT_LIBRARY)
+# Set custom target output name
+set(SHARED_LIB_NAME "${LIBRARY_PREFIX}pqmagic_ml_dsa_std${DYNAMIC_LIB_SUFFIX}")
+set(STATIC_LIB_NAME "${LIBRARY_PREFIX}pqmagic_ml_dsa_std${STATIC_LIB_SUFFIX}")
+
+if(USE_SM3)
+    # Add shared lib.
+    add_library(
+        ml_dsa_target SHARED 
+        ${TARGET_OBJECTS_ALL}
+        $<TARGET_OBJECTS:randombytes>
+        $<TARGET_OBJECTS:sm3>
+    )
+
+    # Add static lib.
+    add_library(
+        ml_dsa_static_target STATIC 
+        ${TARGET_OBJECTS_ALL}
+        $<TARGET_OBJECTS:randombytes>
+        $<TARGET_OBJECTS:sm3>
+    )
+elseif(USE_SHAKE)
+    # Add shared lib.
+    add_library(
+        ml_dsa_target SHARED 
+        ${TARGET_OBJECTS_ALL}
+        $<TARGET_OBJECTS:randombytes>
+        $<TARGET_OBJECTS:fips202>
+    )
+
+    # Add static lib.
+    add_library(
+        ml_dsa_static_target STATIC 
+        ${TARGET_OBJECTS_ALL}
+        $<TARGET_OBJECTS:randombytes>
+        $<TARGET_OBJECTS:fips202>
+    )
+else()
+    message(FATAL_ERROR "Choose hash mode by -DUSE_SM3=ON or -DUSE_SHAKE=ON")
+endif()
+
+# Set library name.
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    # Windows has different rules.
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    # shared：lib*.dll + lib*.lib（import library）
+    # static：lib*.lib
+    set_target_properties(ml_dsa_target PROPERTIES
+        OUTPUT_NAME "${LIBRARY_PREFIX}pqmagic_ml_dsa_std"                     # DLL and import
+        RUNTIME_OUTPUT_NAME "${LIBRARY_PREFIX}pqmagic_ml_dsa_std"             # DLL：*.dll
+        ARCHIVE_OUTPUT_NAME "${LIBRARY_PREFIX}pqmagic_ml_dsa_std_import"      # import lib：*_import.lib
+    )
+    set_target_properties(ml_dsa_static_target PROPERTIES
+        OUTPUT_NAME "${LIBRARY_PREFIX}pqmagic_ml_dsa_std"              # static：*.lib
+    )
+    else() # gcc
+    # shared：lib*.dll + *.dll.a（import library）
+    # static：lib*.a
+    set_target_properties(ml_dsa_target PROPERTIES
+        OUTPUT_NAME "pqmagic_ml_dsa_std"                     # DLL and import
+        RUNTIME_OUTPUT_NAME "pqmagic_ml_dsa_std"             # DLL：*.dll
+        ARCHIVE_OUTPUT_NAME "pqmagic_ml_dsa_std_import"      # import lib：*_import.dll.a
+    )
+    set_target_properties(ml_dsa_static_target PROPERTIES
+        OUTPUT_NAME "pqmagic_ml_dsa_std"              # static：*.a
+    )
+    endif()
+else()
+    # Unix-like（macOS/Linux）
+    # shared：lib*.so/lib*.dylib
+    # static：lib*.a
+    set_target_properties(ml_dsa_target PROPERTIES
+        OUTPUT_NAME "pqmagic_ml_dsa_std"
+    )
+    set_target_properties(ml_dsa_static_target PROPERTIES
+        OUTPUT_NAME "pqmagic_ml_dsa_std"
+    )
+endif()
+
+# Install lib.
+install(FILES ${CURRENT_BUILD_DIR}/${SHARED_LIB_NAME}
+    DESTINATION ${INSTALL_LIB_DIR})
+install(FILES ${CURRENT_BUILD_DIR}/${STATIC_LIB_NAME}
+    DESTINATION ${INSTALL_LIB_DIR})
+
+endif()
+
+# Install api.h params.h config.h to include/ml_dsa dir
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/api.h DESTINATION ${INSTALL_INCLUDE_DIR}/sig/ml_dsa)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/params.h DESTINATION ${INSTALL_INCLUDE_DIR}/sig/ml_dsa)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/config.h DESTINATION ${INSTALL_INCLUDE_DIR}/sig/ml_dsa)

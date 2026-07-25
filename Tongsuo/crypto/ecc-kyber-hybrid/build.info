@@ -1,0 +1,4 @@
+LIBS = ../../libcrypto
+
+SOURCE[../../libcrypto] = \
+    ecc_kyber_hybrid_kem.c

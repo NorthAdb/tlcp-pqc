@@ -1,0 +1,21 @@
+# 与 scripts/openssl_verify.sh 配合使用（可选，显式加载 provider）
+openssl_conf = openssl_init
+
+[openssl_init]
+providers = provider_sect
+
+[provider_sect]
+default = default_sect
+pqmagic = pqmagic_sect
+cert_verify = cert_verify_sect
+
+[default_sect]
+activate = 1
+
+[pqmagic_sect]
+module = /home/wang/Desktop/pqmagic-algorithms-provider/build/pqmagic.so
+activate = 1
+
+[cert_verify_sect]
+module = /home/wang/Desktop/x509-hybrid-verify-provider/cert_verify.so
+activate = 1

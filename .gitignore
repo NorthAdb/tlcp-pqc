@@ -1,0 +1,69 @@
+# --- 构建与安装前缀（可本地重新编译）---
+**/build/
+tongsuo-install/
+pqmagic-install/
+
+# --- 编译中间产物 ---
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp
+*.idb
+*.tlog
+*.lastbuildstate
+*.recipe
+*.vcxproj.user
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.sln
+*.vcxproj
+*.vcxproj.filters
+Win32/
+x64/
+.vs/
+
+# --- Tongsuo 本地配置/编译产物（保留源码与补丁）---
+Tongsuo/Makefile
+Tongsuo/configdata.pm
+Tongsuo/configdata.pm.bak
+Tongsuo/include/openssl/configuration.h
+Tongsuo/include/crypto/bn_conf.h
+Tongsuo/include/crypto/dso_conf.h
+Tongsuo/libcrypto.lib
+Tongsuo/libssl.lib
+Tongsuo/libcrypto_static.lib
+Tongsuo/libssl_static.lib
+Tongsuo/apps/openssl.exe
+Tongsuo/apps/libcrypto-3-x64.dll
+Tongsuo/apps/libssl-3-x64.dll
+Tongsuo/**/*.dll
+Tongsuo/**/*.exe
+Tongsuo/**/*.lib
+
+# --- 本机日志与临时 ---
+*.log
+tmp-verify-out.txt
+mldsa_sign_sm3.obj
+
+# --- 打包副本 ---
+tlcp-pqc.zip
+
+# --- 误拷入的系统文件 / 深层垃圾目录（曾出现在 certs/3/o）---
+**/o/o/
+*.manifest
+certs/**/*.dll
+certs/**/*.exe
+certs/**/*.mui
+
+# --- Python ---
+__pycache__/
+*.pyc
+.venv/
+
+# 说明：
+# - providers/*.dll 与 bin/openssl.exe（layout 后）体积不大，默认跟踪，方便克隆后直接 CLI 验链。
+# - 若希望仓库纯源码、强制人人自编译，可取消下面两行注释：
+# /bin/
+# /providers/

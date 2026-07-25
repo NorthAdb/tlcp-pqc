@@ -1,0 +1,11 @@
+# 追加到系统 openssl.cnf 的 [provider_sect]：
+#   pqmagic = pqmagic_sect
+# 或由 install-openssl-pqmagic.sh 通过 .include 引入
+
+[pqmagic_sect]
+# 使用绝对路径，无需 cp 到 ossl-modules
+module = /home/wang/Desktop/pqmagic-algorithms-provider/build/pqmagic.so
+activate = 1
+
+[default_sect]
+activate = 1

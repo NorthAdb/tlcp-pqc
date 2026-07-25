@@ -1,0 +1,32 @@
+# OpenSSL configuration file for ML-DSA-44-SM2 Provider
+# This file can be included in your main openssl.cnf or used as a standalone config
+
+# Enable provider configuration
+openssl_conf = openssl_init
+
+[openssl_init]
+providers = provider_sect
+
+# Provider section - list all providers
+[provider_sect]
+default = default_sect
+ml_dsa_sm2 = ml_dsa_sm2_sect
+
+# Default provider (required)
+[default_sect]
+activate = 1
+
+# ML-DSA-44-SM2 Provider configuration
+[ml_dsa_sm2_sect]
+# Path to the provider library
+# Use absolute path or relative to the directory where openssl.cnf is located
+module = /home/wang/Desktop/x509-hybrid-spki-provider/libml_dsa_sm2_provider.so
+# Alternative: use provider_path and just the filename
+# provider_path = /home/wang/Desktop/x509-hybrid-spki-provider
+# module = libml_dsa_sm2_provider.so
+activate = 1
+
+# Note: If you want to add this to your system openssl.cnf, you can:
+# 1. Copy the [ml_dsa_sm2_sect] section to your openssl.cnf
+# 2. Add "ml_dsa_sm2 = ml_dsa_sm2_sect" to the [provider_sect] section
+# 3. Make sure openssl_conf = openssl_init is set at the top level

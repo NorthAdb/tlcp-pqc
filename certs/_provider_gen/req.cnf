@@ -1,0 +1,9 @@
+[req]
+distinguished_name = dn
+prompt = no
+default_md = sm3
+
+[dn]
+CN = ProviderGenDemo
+O = TLCP-PQC
+C = CN

@@ -1,0 +1,33 @@
+# 与 Tongsuo/apps/openssl-providers.cnf 一致；也可：export OPENSSL_CONF=本文件
+config_diagnostics = 0
+
+openssl_conf = openssl_init
+
+[openssl_init]
+providers = provider_sect
+
+[provider_sect]
+default = default_sect
+pqmagic = pqmagic_sect
+ml_dsa_sm2 = ml_dsa_sm2_sect
+cert_verify = cert_verify_sect
+aigis_enc = aigis_enc_sect
+
+[default_sect]
+activate = 1
+
+[pqmagic_sect]
+module = /home/wang/Desktop/pqmagic-algorithms-provider/build/pqmagic.so
+activate = 1
+
+[ml_dsa_sm2_sect]
+module = /home/wang/Desktop/x509-hybrid-spki-provider/libml_dsa_sm2_provider.so
+activate = 1
+
+[cert_verify_sect]
+module = /home/wang/Desktop/x509-hybrid-verify-provider/cert_verify.so
+activate = 1
+
+[aigis_enc_sect]
+module = /home/wang/Desktop/ntls-aigis-provider/build/aigis_enc.so
+activate = 1

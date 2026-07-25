@@ -1,0 +1,11 @@
+openssl_conf = openssl_init
+
+[openssl_init]
+providers = provider_sect
+
+[provider_sect]
+aigis_enc = aigis_enc_sect
+
+[aigis_enc_sect]
+activate = 1
+module = /home/wang/Desktop/ntls-aigis-provider/build/aigis_enc.so
