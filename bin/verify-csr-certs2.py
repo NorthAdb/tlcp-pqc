@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Verify PKCS#10 CSR for tlcp-pqc/certs/2 (ML-DSA-44-SM2 composite self-signature).
+Verify PKCS#10 CSR for Hybrid Concatenated Certificate/mlkemdsa (ML-DSA-44-SM2 composite self-signature).
 
 Dual verification (aligned with cert_verify_mldsa44_sm2_composite / gen-csr-certs2.py):
   [1/2] ML-DSA-44-with-SM3: SM3(CertificationRequestInfo) vs ML-DSA segment (2420 B)
@@ -329,7 +329,7 @@ def verify_csr_file(
 
 
 def print_rules() -> None:
-    print("=== CSR 验签规则 (certs/2) ===")
+    print("=== CSR 验签规则 (Hybrid Concatenated / mlkemdsa) ===")
     print(f"  签名算法 OID: {OID_MLDSA44_SM2_WITH_SM3} (ML-DSA-44-SM2-with-SM3)")
     print(f"  SPKI OID:     {OID_MLDSA44_SM2} (ML-DSA-44-SM2)")
     print("  [1/2] ML-DSA-44-with-SM3: SM3(完整 CRI)，签名段前 2420 字节")
@@ -354,15 +354,19 @@ def print_result(res: VerifyResult) -> None:
 def main() -> int:
     root = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(
-        description="Verify ML-DSA-44-SM2 composite CSR (tlcp-pqc/certs/2)"
+        description="Verify ML-DSA-44-SM2 composite CSR (Hybrid Concatenated Certificate/mlkemdsa)"
     )
     parser.add_argument(
         "csr",
         nargs="*",
         type=Path,
-        help="CSR 文件路径；省略时验 certs/2/csr 下默认三项",
+        help="CSR 文件路径；省略时验 Hybrid Concatenated Certificate/mlkemdsa/csr 下默认三项",
     )
-    parser.add_argument("--certs-dir", type=Path, default=root / "certs" / "2")
+    parser.add_argument(
+        "--certs-dir",
+        type=Path,
+        default=root / "certs" / "Hybrid Concatenated Certificate" / "mlkemdsa",
+    )
     parser.add_argument("--csr-dir", type=Path, default=None)
     parser.add_argument(
         "--names",
@@ -398,7 +402,7 @@ def main() -> int:
         targets = [(n, csr_dir / f"{n}.csr") for n in args.names]
 
     if not args.quiet:
-        print("======== certs/2 CSR 复合验签 ========")
+        print("======== Hybrid Concatenated / mlkemdsa CSR 复合验签 ========")
         print_rules()
 
     failed = 0

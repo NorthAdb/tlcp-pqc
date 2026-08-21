@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate PKCS#10 CSR for tlcp-pqc/certs/1 (pure PQC).
+Generate PKCS#10 CSR for Pure PQC Certificate/mlkemdsa (pure PQC).
 
 Inputs (recommended):
   --key  PKCS#8 private key PEM (e.g. user_sig_pkcs8.pem)
@@ -375,7 +375,7 @@ def main() -> int:
     root = Path(__file__).resolve().parent.parent
     bin_dir = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(
-        description="Generate pure PQC PKCS#10 CSR for tlcp-pqc/certs/1"
+        description="Generate pure PQC PKCS#10 CSR for Pure PQC Certificate/mlkemdsa"
     )
     parser.add_argument(
         "--key",
@@ -392,7 +392,7 @@ def main() -> int:
         type=Path,
         help="输出 CSR 路径（单文件模式）",
     )
-    parser.add_argument("--certs-dir", type=Path, default=root / "certs" / "1")
+    parser.add_argument("--certs-dir", type=Path, default=root / "certs" / "Pure PQC Certificate" / "mlkemdsa")
     parser.add_argument("--out-dir", type=Path, default=None)
     parser.add_argument(
         "--signer",

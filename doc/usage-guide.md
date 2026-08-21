@@ -2,7 +2,7 @@
 
 > **项目根目录**（下文 `$TLCP`）：`D:\20240429certificate-verification\tlcp-pqc`  
 > **OpenSSL**：Tongsuo 8.5（`bin\openssl.exe`），非系统 PATH 上的 openssl  
-> **最后验证**：2026-07-06（本机 CMD/PowerShell 实测通过）
+> **最后验证**：2026-08-21（含 Aigis 三套样证 openssl x509 / verify 实测通过）
 
 ---
 
@@ -17,7 +17,7 @@ tlcp-pqc/
 │   ├── Set-TlcpEnv.bat/.ps1      # 导入环境（必用）
 │   ├── demo-provider-gen-csr.bat           # 纯 PQC CSR 演示（含重编）
 │   ├── demo-provider-gen-composite-csr.bat # 复合 CSR 演示（仅 CLI）
-│   ├── verify-chain.ps1          # 三套样例证验链
+│   ├── verify-chain.ps1          # 样例证验链（-Algo mlkemdsa|aigis）
 │   ├── verify-csr-certs2.py      # Python 双重验签（对照用）
 │   └── rebuild-*.bat             # 增量重编
 ├── config/
@@ -26,18 +26,26 @@ tlcp-pqc/
 │   ├── pqmagic.dll               # ML-DSA / ML-KEM GEN·签·编解码
 │   ├── libml_dsa_sm2_provider.dll# 复合 SPKI 解析
 │   ├── cert_verify.dll           # 复合/混合证·CSR 双重验签
-│   └── aigis_enc.dll
+│   ├── aigis.dll                 # Aigis-SIG1/Enc-1 证书解析与验签
 ├── certs/
-│   ├── 1/                        # 纯 PQC 样例证
-│   ├── 2/                        # ML-DSA-44-SM2 复合 SPKI 样例证
-│   ├── 3/                        # 国密混合扩展证
+│   ├── Pure PQC Certificate/
+│   │   ├── mlkemdsa/             # 纯 ML-DSA/ML-KEM
+│   │   └── aigis/                # 纯 Aigis-SIG1/Enc-1
+│   ├── Hybrid Concatenated Certificate/
+│   │   ├── mlkemdsa/             # ML-DSA-SM2 串联
+│   │   └── aigissm2/             # Aigis‖SM2 串联
+│   ├── Hybrid Using Extensions Certificate/
+│   │   ├── mlkemdsa/             # SM2 + ML-DSA 扩展
+│   │   └── sm2extaigis/          # SM2 + Aigis 扩展
 │   ├── _provider_gen/             # 纯 PQC 演示产物
 │   └── _provider_gen_composite/   # 复合 CSR 演示产物
-├── Tongsuo/                      # Tongsuo 源码（含 -sm2key 补丁）
+├── Tongsuo/                      # Tongsuo 源码（含 -sm2key / Aigis 验链补丁）
 ├── pqmagic-algorithms-provider/
+├── aigis-provider/               # Aigis X.509 provider（SIG1/ENC1）
 ├── x509-hybrid-spki-provider/
 ├── x509-hybrid-verify-provider/
 ├── build-*.bat                   # 全量/增量构建
+├── rebuild-aigis-x509-provider.bat # 重建 PQMagic(SIG1/ENC1)+aigis.dll
 ├── layout-tlcp-pqc.bat           # 拷贝到 bin/providers
 └── doc/
     ├── usage-guide.md            # 本文
@@ -58,8 +66,8 @@ tlcp-pqc/
 
 脚本内默认路径（若本机不同需改 bat 内 `VCVARS` / `CMAKE`）：
 
-- `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat`
-- `C:\Program Files\CMake\bin\cmake.exe`
+- `D:\DevTools\VS2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat`
+- `D:\DevTools\Strawberry\c\bin\cmake.exe`
 
 ---
 
@@ -89,7 +97,7 @@ openssl req -help | findstr sm2key
 **期望**：
 
 - 版本含 `Tongsuo 8.5.0-dev`
-- 5 个 active provider：`default`、`pqmagic`、`ml_dsa_sm2`、`cert_verify`、`aigis_enc`
+- 4 个 active provider：`default`、`pqmagic`、`ml_dsa_sm2`、`cert_verify`；证书 Aigis 另加载 `aigis`
 - `req -help` 中有 `-sm2key`（复合 CSR 必需）
 
 也可在项目根使用包装器（自动设 `OPENSSL_CONF`）：
@@ -118,7 +126,7 @@ REM 3) 拷贝 openssl.exe / DLL / providers 到 bin\
 layout-tlcp-pqc.bat
 ```
 
-`build-providers.bat` 依次构建：PQMagic → pqmagic.dll → ml_dsa_sm2 → cert_verify → aigis_enc，最后调用 layout。
+`build-providers.bat` 依次构建：PQMagic → pqmagic.dll → ml_dsa_sm2 → cert_verify，最后调用 layout。Aigis 证书 provider 用 `rebuild-aigis-x509-provider.bat`。
 
 `build-tongsuo.bat` 执行 `perl Configure` → `nmake build_libs build_apps` → `nmake install_sw`，安装到 `tongsuo-install\`。
 
@@ -217,7 +225,7 @@ openssl req -in <path>.csr -text -noout
 | 密钥 | 1× ML-DSA PKCS#8 | ML-DSA + SM2 各一文件 |
 | 验签 | 标准 req -verify | cert_verify 双重验签 |
 
-参考 CSR：`certs\2\csr\用户证书请求.csr`
+参考 CSR：`certs\Hybrid Concatenated Certificate\mlkemdsa\csr\用户证书请求.csr`
 
 ### 5.5 Python 对照验签（可选）
 
@@ -225,7 +233,7 @@ openssl req -in <path>.csr -text -noout
 python bin\verify-csr-certs2.py ^
   --openssl bin\openssl.exe ^
   --verifier bin\mldsa_sign_sm3.exe ^
-  certs\2\csr\用户证书请求.csr
+  certs\Hybrid Concatenated Certificate\mlkemdsa\csr\用户证书请求.csr
 ```
 
 > **注意**：`openssl req -verify` 为权威结果。Python 脚本对**较长 subject** 的 CRI 提取可能与 libcrypto 略有差异；若 Python FAIL 但 `req -verify` OK，以 OpenSSL 为准。
@@ -238,48 +246,61 @@ python bin\verify-csr-certs2.py ^
 
 | 目录 | 类型 | 签名算法 |
 |------|------|----------|
-| `certs/1` | 纯 PQC SPKI | ML-DSA-44-with-SM3 |
-| `certs/2` | 复合 SPKI（PQC+SM2 拼接） | ML-DSA-44-SM2-with-SM3 |
-| `certs/3` | SM2 主体 + PQC 扩展 | 外层 SM2 + 内层 ML-DSA（扩展 4.1.8） |
+| `certs/Pure PQC Certificate/mlkemdsa` | 纯 PQC SPKI | ML-DSA-44-with-SM3 |
+| `certs/Hybrid Concatenated Certificate/mlkemdsa` | 复合 SPKI（PQC+SM2 拼接） | ML-DSA-44-SM2-with-SM3 |
+| `certs/Hybrid Using Extensions Certificate/mlkemdsa` | SM2 主体 + PQC 扩展 | 外层 SM2 + 内层 ML-DSA（扩展 4.1.8） |
+| `certs/Pure PQC Certificate/aigis` | 纯 Aigis SPKI | Aigis-SIG1-with-SM3 |
+| `certs/Hybrid Concatenated Certificate/aigissm2` | Aigis‖SM2 串联 | Aigis-SIG1-SM2-with-SM3 |
+| `certs/Hybrid Using Extensions Certificate/sm2extaigis` | SM2 主体 + Aigis 扩展 | 外层 SM2 + 内层 Aigis-SIG1 |
 
-### 6.1 一键验三套链
+加载 `aigis` provider 后可用 `openssl x509 -text` / `openssl verify` 查看与验链（与 mlkemdsa 相同流程）。重建：`rebuild-aigis-x509-provider.bat`。
+
+### 6.1 一键验链
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File bin\verify-chain.ps1 -CertSet 1
-powershell -NoProfile -ExecutionPolicy Bypass -File bin\verify-chain.ps1 -CertSet 2
-powershell -NoProfile -ExecutionPolicy Bypass -File bin\verify-chain.ps1 -CertSet 3
+# ML-DSA / ML-KEM（默认 -Algo mlkemdsa）
+powershell -NoProfile -ExecutionPolicy Bypass -File bin\verify-chain.ps1 -CertSet pure
+powershell -NoProfile -ExecutionPolicy Bypass -File bin\verify-chain.ps1 -CertSet concat
+powershell -NoProfile -ExecutionPolicy Bypass -File bin\verify-chain.ps1 -CertSet ext
+
+# Aigis SIG1 / Enc-1
+powershell -NoProfile -ExecutionPolicy Bypass -File bin\verify-chain.ps1 -Algo aigis -CertSet pure
+powershell -NoProfile -ExecutionPolicy Bypass -File bin\verify-chain.ps1 -Algo aigis -CertSet concat
+powershell -NoProfile -ExecutionPolicy Bypass -File bin\verify-chain.ps1 -Algo aigis -CertSet ext
 ```
 
-或：
+或一次跑完两类算法各三套：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File bin\verify-chain-all.ps1
+# 仅 Aigis：
+powershell -NoProfile -ExecutionPolicy Bypass -File bin\verify-chain-all.ps1 -Algo aigis
 ```
 
-**期望**：每张证最后一行 `xxx.crt: OK`；certs/2、3 会打印双重验签进度。
+**期望**：每张证最后一行 `xxx.crt: OK`；混合串联/扩展会打印双重验签进度。
 
-### 6.2 手动 openssl verify（以 certs/2 为例）
+### 6.2 手动 openssl verify（以 certs/Hybrid Concatenated Certificate/mlkemdsa 为例）
 
 ```cmd
 call bin\Set-TlcpEnv.bat
 
-openssl verify -CAfile certs\2\root.crt -untrusted certs\2\yunying.crt certs\2\user_sig.crt
-openssl verify -CAfile certs\2\root.crt -untrusted certs\2\yunying.crt certs\2\user_enc.crt
+openssl verify -CAfile certs\Hybrid Concatenated Certificate\mlkemdsa\root.crt -untrusted certs\Hybrid Concatenated Certificate\mlkemdsa\yunying.crt certs\Hybrid Concatenated Certificate\mlkemdsa\user_sig.crt
+openssl verify -CAfile certs\Hybrid Concatenated Certificate\mlkemdsa\root.crt -untrusted certs\Hybrid Concatenated Certificate\mlkemdsa\yunying.crt certs\Hybrid Concatenated Certificate\mlkemdsa\user_enc.crt
 ```
 
 ### 6.3 查看单张证
 
 ```cmd
-openssl x509 -in certs\2\user_sig.crt -text -noout
-openssl x509 -in certs\2\user_sig.crt -noout -subject -issuer -dates -signature_algorithm
+openssl x509 -in certs\Hybrid Concatenated Certificate\mlkemdsa\user_sig.crt -text -noout
+openssl x509 -in certs\Hybrid Concatenated Certificate\mlkemdsa\user_sig.crt -noout -subject -issuer -dates -signature_algorithm
 ```
 
 PowerShell 脚本：
 
 ```powershell
-bin\inspect-cert.ps1 -CertPath certs\2\user_sig.crt -Summary
-bin\inspect-certs-2-3.ps1    # 批量查看 certs/2、3
-bin\check-cert-view-all.ps1  # 12 张证一键查看
+bin\inspect-cert.ps1 -CertPath certs\Hybrid Concatenated Certificate\mlkemdsa\user_sig.crt -Summary
+bin\check-cert-view-all.ps1  # 12 张证总验收（解析/ASN.1/链元数据）
+bin\verify-chain-all.ps1     # 三套链密码学验签
 ```
 
 更完整命令集见：`certs\Windows查看与验链命令.md`。
@@ -302,16 +323,16 @@ openssl list -providers
 
 bin\demo-provider-gen-composite-csr.bat
 
-openssl req -in certs\2\csr\用户证书请求.csr -verify -noout
+openssl req -in certs\Hybrid Concatenated Certificate\mlkemdsa\csr\用户证书请求.csr -verify -noout
 openssl req -in certs\_provider_gen\demo.csr -verify -noout
 ```
 
 PowerShell 验链：
 
 ```powershell
-powershell -EP Bypass -File bin\verify-chain.ps1 -CertSet 1
-powershell -EP Bypass -File bin\verify-chain.ps1 -CertSet 2
-powershell -EP Bypass -File bin\verify-chain.ps1 -CertSet 3
+powershell -EP Bypass -File bin\verify-chain.ps1 -CertSet pure
+powershell -EP Bypass -File bin\verify-chain.ps1 -CertSet concat
+powershell -EP Bypass -File bin\verify-chain.ps1 -CertSet ext
 ```
 
 | 步骤 | 结果 |
@@ -319,8 +340,8 @@ powershell -EP Bypass -File bin\verify-chain.ps1 -CertSet 3
 | `Set-TlcpEnv` + 5 providers | ✅ |
 | `demo-provider-gen-composite-csr.bat` | ✅ |
 | `demo-provider-gen-csr.bat`（含重编） | ✅ |
-| `verify-chain.ps1` certs/1/2/3 | ✅ 全部 OK |
-| `req -verify` certs/2 用户 CSR | ✅ |
+| `verify-chain.ps1` certs/Pure PQC Certificate/mlkemdsa/2/3 | ✅ 全部 OK |
+| `req -verify` certs/Hybrid Concatenated Certificate/mlkemdsa 用户 CSR | ✅ |
 | `req -verify` _provider_gen demo.csr | ✅ |
 
 ---
@@ -339,7 +360,7 @@ powershell -EP Bypass -File bin\verify-chain.ps1 -CertSet 3
 | `layout-tlcp-pqc.bat` | 拷贝运行时到 bin/providers |
 | `rebuild-cert-verify.bat` | 仅 cert_verify.dll |
 | `rebuild-pqmagic-portable.bat` | 可移植 PQMagic 重编 |
-| `rebuild-aigis-provider.bat` | aigis_enc.dll |
+| `rebuild-aigis-x509-provider.bat` | aigis.dll（SIG1/ENC1 证书） |
 | `bin\rebuild-req-sm2key.bat` | req -sm2key 改动后增量重编 openssl |
 | `bin\rebuild-libcrypto-incremental.bat` | x509 补丁后重编 libcrypto |
 | `bin\build-mldsa-sign.bat` | 编译 mldsa_sign_sm3.exe |
@@ -350,19 +371,18 @@ powershell -EP Bypass -File bin\verify-chain.ps1 -CertSet 3
 |------|------|
 | `bin\demo-provider-gen-csr.bat` | 纯 PQC：重编 + genpkey + req + verify |
 | `bin\demo-provider-gen-composite-csr.bat` | 复合：双 genpkey + req -sm2key + verify |
-| `bin\verify-chain.ps1` | 参数 `-CertSet 1|2|3` |
+| `bin\verify-chain.ps1` | 参数 `-CertSet pure|2|3` |
 | `bin\verify-chain-all.ps1` | 三套链一次跑完 |
 | `bin\verify-csr-certs2.py` | Python 双重验签（对照） |
-| `bin\gen-csr-certs1.py` / `gen-csr-certs2.py` | 从 certs/1、2 既有材料生成 CSR（历史脚本） |
+| `bin\gen-csr-certs1.py` / `gen-csr-certs2.py` | 从 certs/Pure PQC Certificate/mlkemdsa、2 既有材料生成 CSR（历史脚本） |
 
 ### 8.3 查看 / 诊断
 
 | 脚本 | 作用 |
 |------|------|
 | `bin\inspect-cert.ps1` | 单证摘要或全文 |
-| `bin\inspect-certs-1.ps1` / `2-3.ps1` | 按套别批量 |
-| `bin\check-cert-view-all.ps1` | 12 张证 |
-| `bin\check-cert-chain-meta.ps1` | ASN.1 结构检查 |
+| `bin\check-cert-view-all.ps1` | 12 张证总验收：解析、ASN.1、issuer/subject、有效期 |
+| `bin\verify-chain.ps1` / `verify-chain-all.ps1` | 密码学验链（含双重验签） |
 
 ---
 
@@ -417,7 +437,7 @@ layout-tlcp-pqc.bat
 
 call bin\Set-TlcpEnv.bat
 bin\demo-provider-gen-composite-csr.bat
-powershell -EP Bypass -File bin\verify-chain.ps1 -CertSet 2
+powershell -EP Bypass -File bin\verify-chain.ps1 -CertSet concat
 
 REM 3. 同步 GUI（可选）
 ..\certificate-verification-win32-x64\scrpts\layout-app-resources.bat

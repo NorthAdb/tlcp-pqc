@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableDelayedExpansion
 set "TLCP_ROOT=D:\20240429certificate-verification\tlcp-pqc"
-set "VCVARS=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+set "VCVARS=D:\DevTools\VS2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
 
 if not exist "%VCVARS%" (
     echo ERROR: vcvars64.bat not found

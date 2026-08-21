@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Generate PKCS#10 CSR for tlcp-pqc/certs/2 (ML-DSA-44-SM2 / ML-KEM-512-SM2).
+Generate PKCS#10 CSR for Hybrid Concatenated Certificate/mlkemdsa (ML-DSA-44-SM2 / ML-KEM-512-SM2).
 
-思路与 certs/1 一致：
+思路与 Pure PQC (mlkemdsa) 一致：
 1. 从现有证书提取 subject；
 2. 从 .key 的 PUBLIC KEY 块读取 PQC 裸公钥；
 3. 从 *_sm2.key 导出 SM2 公钥点；
@@ -291,8 +291,8 @@ def pem_csr(der: bytes) -> str:
 
 def main() -> int:
     root = Path(__file__).resolve().parent.parent
-    parser = argparse.ArgumentParser(description="Generate CSR for tlcp-pqc/certs/2")
-    parser.add_argument("--certs-dir", type=Path, default=root / "certs" / "2")
+    parser = argparse.ArgumentParser(description="Generate CSR for Hybrid Concatenated Certificate/mlkemdsa")
+    parser.add_argument("--certs-dir", type=Path, default=root / "certs" / "Hybrid Concatenated Certificate" / "mlkemdsa")
     parser.add_argument("--out-dir", type=Path, default=None)
     parser.add_argument(
         "--signer",

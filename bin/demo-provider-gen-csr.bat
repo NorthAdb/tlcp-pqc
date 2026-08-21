@@ -1,12 +1,12 @@
 @echo off
 setlocal EnableExtensions
 set "ROOT=D:\20240429certificate-verification\tlcp-pqc"
-set "VCVARS=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-set "CMAKE=C:\Program Files\CMake\bin\cmake.exe"
+set "VCVARS=D:\DevTools\VS2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+set "CMAKE=D:\DevTools\Strawberry\c\bin\cmake.exe"
 
 call "%VCVARS%" >nul
 if errorlevel 1 exit /b 1
-set "PATH=C:\Strawberry\perl\bin;%PATH%"
+set "PATH=D:\DevTools\Strawberry\perl\bin;%PATH%"
 set "CL=/utf-8"
 
 echo === [1/3] Build pqmagic provider ===

@@ -11,7 +11,7 @@ set "PQMAGIC_PROVIDER=%TLCP_ROOT%\providers\pqmagic.dll"
 set "ML_DSA_SM2_PROVIDER=%TLCP_ROOT%\providers\libml_dsa_sm2_provider.dll"
 set "PQMAGIC_STD_LIB=%TLCP_ROOT%\providers\pqmagic.dll"
 set "CERT_VERIFY_SO=%TLCP_ROOT%\providers\cert_verify.dll"
-set "AIGIS_ENC_PROVIDER=%TLCP_ROOT%\providers\aigis_enc.dll"
+set "AIGIS_PROVIDER=%TLCP_ROOT%\providers\aigis.dll"
 set "CERT_VERIFY_VERIFY_INFO=1"
 set "OPENSSL=%TLCP_ROOT%\bin\openssl.exe"
 

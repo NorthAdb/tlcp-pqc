@@ -1,9 +1,9 @@
 @echo off
 setlocal EnableExtensions
 set "ROOT=D:\20240429certificate-verification\tlcp-pqc"
-call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+call "D:\DevTools\VS2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
 if errorlevel 1 exit /b 1
-set PATH=C:\Strawberry\perl\bin;%PATH%
+set PATH=D:\DevTools\Strawberry\perl\bin;%PATH%
 set CL=/utf-8
 cd /d "%ROOT%\Tongsuo"
 nmake libcrypto-3-x64.dll

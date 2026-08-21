@@ -4,9 +4,15 @@
 #include <stdint.h>
 #include "params.h"
 
-typedef struct {
+#if defined(_WIN32) || defined(_WIN64)
+# define AIGIS_SIG_ALIGN(N) __declspec(align(N))
+#else
+# define AIGIS_SIG_ALIGN(N) __attribute__((aligned(N)))
+#endif
+
+typedef struct AIGIS_SIG_ALIGN(32) {
   uint32_t coeffs[PARAM_N];
-} poly __attribute__((aligned(32)));
+} poly;
 
 #define poly_copy AIGIS_SIG_NAMESPACE(poly_copy)
 void poly_copy(poly *b, const poly *a);

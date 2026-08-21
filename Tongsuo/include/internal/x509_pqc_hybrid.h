@@ -1,5 +1,6 @@
 /*
- * 扩展验签：certs/3 国密混合证、certs/2 ML-DSA-44-SM2 复合证、certs/1 裸 PQC SPKI。
+ * 扩展验签：certs/3 国密混合证、certs/2 ML-DSA-44-SM2 复合证、certs/1 裸 PQC SPKI、
+ * Aigis SIG1 纯/串联/扩展样证。
  */
 #ifndef OSSL_X509_PQC_HYBRID_H
 # define OSSL_X509_PQC_HYBRID_H
@@ -14,6 +15,11 @@
 # define OSSL_PQC_MLKEM512_PK_LEN  800
 # define OSSL_PQC_MLKEM512_SK_LEN  1632
 # define OSSL_PQC_SM2_HYBRID_PK_LEN 65
+# define OSSL_PQC_AIGIS_SIG1_SIG_LEN 1852
+
+# define OSSL_AIGIS_OID_SIG1_SM2_WITH_SM3 "1.2.156.10197.1.510.1"
+# define OSSL_AIGIS_OID_SIG1_WITH_SM3    "1.2.156.10197.1.509.1"
+# define OSSL_AIGIS_OID_SIG1_SM2_SPKI    "1.2.156.10197.1.512.1"
 
 /* certs/2：签名算法 ML-DSA-44-SM2-with-SM3 */
 static ossl_inline int ossl_x509_is_mldsa44_sm2_cert(const X509 *cert)
@@ -23,10 +29,16 @@ static ossl_inline int ossl_x509_is_mldsa44_sm2_cert(const X509 *cert)
 }
 
 /*
+ * Aigis 串联复合证（aigissm2）：签名 OID 1.2.156.10197.1.510.1。
+ * NID 由 aigis provider 动态 OBJ_create，故用 OID 文本比较。
+ */
+int ossl_x509_is_aigis_sig1_sm2_cert(const X509 *cert);
+
+/*
  * 在解析/验签前加载 pqmagic-algorithms-provider（certs/1 裸 SPKI、certs/2 验签）
  * 与 x509-hybrid-spki-provider（certs/2 复合 SPKI），不依赖 OPENSSL_CONF。
  * 环境变量：PQMAGIC_PROVIDER、ML_DSA_SM2_PROVIDER（或 X509_HYBRID_SPKI_PROVIDER）、
- * CERT_VERIFY_SO / X509_HYBRID_VERIFY_SO。
+ * CERT_VERIFY_SO / X509_HYBRID_VERIFY_SO、AIGIS_PROVIDER。
  */
 int ossl_x509_ensure_pqc_providers(OSSL_LIB_CTX *libctx);
 
@@ -35,6 +47,15 @@ int ossl_x509_ensure_pqc_providers(OSSL_LIB_CTX *libctx);
  */
 int ossl_x509_verify_mldsa44_sm2_composite(const X509 *cert, const X509 *issuer,
                                             OSSL_LIB_CTX *libctx);
+
+/*
+ * Aigis 串联/扩展：加载 aigis.dll，调用 aigis_x509_verify_pair。
+ */
+int ossl_x509_verify_aigis(const X509 *cert, const X509 *issuer,
+                           OSSL_LIB_CTX *libctx);
+
+/* 混合扩展证内层是否为 Aigis-SIG1（扩展 4.1.7） */
+int ossl_x509_hybrid_ext_is_aigis(const X509 *cert);
 
 static ossl_inline int ossl_x509_is_mldsa44_sm2_req(const X509_REQ *req)
 {

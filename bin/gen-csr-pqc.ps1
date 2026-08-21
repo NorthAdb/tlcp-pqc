@@ -1,13 +1,13 @@
 <#
 .SYNOPSIS
-  生成纯 PQC PKCS#10 CSR（certs/1）。
+  生成纯 PQC PKCS#10 CSR（Pure PQC Certificate\mlkemdsa）。
 
   使用 PKCS#8 私钥 + 证书中的 Subject/SPKI，签名依赖 mldsa_sign_sm3.exe。
   openssl req -new 目前不支持 ML-DSA-44-SPKI，故不走 req -new。
 
 .EXAMPLE
   .\gen-csr-pqc.ps1
-  .\gen-csr-pqc.ps1 -Key ..\certs\1\user_sig_pkcs8.pem -Cert ..\certs\1\user_sig.crt -Out ..\certs\1\csr\user_sig.csr
+  .\gen-csr-pqc.ps1 -Key "..\certs\Pure PQC Certificate\mlkemdsa\user_sig_pkcs8.pem" -Cert "..\certs\Pure PQC Certificate\mlkemdsa\user_sig.crt" -Out "..\certs\Pure PQC Certificate\mlkemdsa\csr\user_sig.csr"
 #>
 param(
     [string]$Key = "",
@@ -31,7 +31,7 @@ if (-not $py) {
 
 $script = Join-Path $PSScriptRoot "gen-csr-certs1.py"
 $signer = Join-Path $PSScriptRoot "mldsa_sign_sm3.exe"
-$certsDir = Join-Path $env:TLCP_ROOT "certs\1"
+$certsDir = Join-Path $env:TLCP_ROOT "certs\Pure PQC Certificate\mlkemdsa"
 
 if (-not (Test-Path $signer)) {
     Write-Host "未找到 mldsa_sign_sm3.exe，正在编译..." -ForegroundColor Yellow

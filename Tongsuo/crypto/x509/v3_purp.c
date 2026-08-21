@@ -378,6 +378,17 @@ static int check_sig_alg_match(const EVP_PKEY *issuer_key, const X509 *subject)
     if (sig_oid_nid == NID_ML_DSA_44_SM2_with_SM3
         && EVP_PKEY_is_a(issuer_key, SN_ML_DSA_44_SM2))
         return X509_V_OK;
+    /* Aigis-SIG1-SM2-with-SM3 ↔ Aigis-SIG1-SM2（OID 动态注册） */
+    {
+        char sig_oid[80];
+
+        if (OBJ_obj2txt(sig_oid, sizeof(sig_oid),
+                        subject->cert_info.signature.algorithm, 1) > 0
+            && strcmp(sig_oid, "1.2.156.10197.1.510.1") == 0
+            && (EVP_PKEY_is_a(issuer_key, "Aigis-SIG1-SM2")
+                || EVP_PKEY_is_a(issuer_key, "1.2.156.10197.1.512.1")))
+            return X509_V_OK;
+    }
     if (OBJ_find_sigid_algs(sig_oid_nid, NULL, &subj_sig_nid) == 0)
          return X509_V_ERR_UNSUPPORTED_SIGNATURE_ALGORITHM;
     if (EVP_PKEY_is_a(issuer_key, OBJ_nid2sn(subj_sig_nid))

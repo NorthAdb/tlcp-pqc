@@ -45,6 +45,9 @@
 # ifndef DEFAULT_CERT_VERIFY_SO
 #  define DEFAULT_CERT_VERIFY_SO TLCP_PQC_ROOT "\\providers\\cert_verify.dll"
 # endif
+# ifndef DEFAULT_AIGIS_PROVIDER
+#  define DEFAULT_AIGIS_PROVIDER TLCP_PQC_ROOT "\\providers\\aigis.dll"
+# endif
 #else
 # ifndef DEFAULT_PQMAGIC_PROVIDER
 #  define DEFAULT_PQMAGIC_PROVIDER \
@@ -61,6 +64,10 @@
 # ifndef DEFAULT_CERT_VERIFY_SO
 #  define DEFAULT_CERT_VERIFY_SO \
     "/home/wang/Desktop/x509-hybrid-verify-provider/cert_verify.so"
+# endif
+# ifndef DEFAULT_AIGIS_PROVIDER
+#  define DEFAULT_AIGIS_PROVIDER \
+    "/home/wang/Desktop/aigis-provider/build/aigis.so"
 # endif
 #endif
 
@@ -97,14 +104,20 @@ static pqmagic_mlkem512_keypair_fn ossl_x509_pqmagic_mlkem512_keypair(void)
 }
 
 #define CV_OID_EXT_PQC_PUB  "1.2.156.10260.4.1.6"
+#define CV_OID_EXT_PQC_SIGALG "1.2.156.10260.4.1.7"
 
 typedef int (*cv_providers_load_fn)(OSSL_LIB_CTX *libctx);
 typedef int (*cv_mldsa_hybrid_fn)(X509 *cert, X509 *issuer, OSSL_LIB_CTX *libctx);
 typedef int (*cv_mldsa44_sm2_fn)(X509 *cert, X509 *issuer, OSSL_LIB_CTX *libctx);
 typedef int (*cv_req_mldsa44_sm2_fn)(X509_REQ *req, OSSL_LIB_CTX *libctx);
 typedef void (*cv_set_trace_fn)(int enable);
+typedef int (*aigis_verify_pair_fn)(X509 *cert, X509 *issuer, OSSL_LIB_CTX *libctx);
+typedef int (*aigis_verify_pair_detail_fn)(X509 *cert, X509 *issuer,
+                                           OSSL_LIB_CTX *libctx, int *mode,
+                                           int *aigis_ok, int *sm2_ok);
 
 static ASN1_OBJECT *obj_pqc_pub;
+static ASN1_OBJECT *obj_pqc_sigalg;
 static int pqc_oids_inited;
 
 static void *cv_dso;
@@ -116,9 +129,16 @@ static cv_set_trace_fn cv_set_trace;
 static int cv_bind_attempted;
 static int cv_bind_ok;
 
+static void *aigis_dso;
+static aigis_verify_pair_fn aigis_verify_pair;
+static aigis_verify_pair_detail_fn aigis_verify_pair_detail;
+static int aigis_bind_attempted;
+static int aigis_bind_ok;
+
 static OSSL_PROVIDER *pqc_prov_default;
 static OSSL_PROVIDER *pqc_prov_pqmagic;
 static OSSL_PROVIDER *pqc_prov_mldsa_sm2;
+static OSSL_PROVIDER *pqc_prov_aigis;
 static OSSL_LIB_CTX *pqc_prov_loaded_libctx;
 static int pqc_builtin_providers_done;
 
@@ -137,11 +157,11 @@ static OSSL_PROVIDER *pqc_load_provider_path(OSSL_LIB_CTX *libctx,
 
 int ossl_x509_ensure_pqc_providers(OSSL_LIB_CTX *libctx)
 {
-    const char *pqmagic_path, *mldsa_path;
+    const char *pqmagic_path, *mldsa_path, *aigis_path;
 
     /*
      * provider 按 libctx 加载；首次在 NULL（默认 ctx）加载后，
-     * apps 的独立 libctx 仍须单独加载 pqmagic / ml_dsa_sm2。
+     * apps 的独立 libctx 仍须单独加载 pqmagic / ml_dsa_sm2 / aigis。
      */
     if (pqc_builtin_providers_done && pqc_prov_loaded_libctx == libctx)
         return pqc_prov_default != NULL;
@@ -156,16 +176,21 @@ int ossl_x509_ensure_pqc_providers(OSSL_LIB_CTX *libctx)
         mldsa_path = getenv("ML_DSA_SM2_PROVIDER");
     if (mldsa_path == NULL || mldsa_path[0] == '\0')
         mldsa_path = DEFAULT_ML_DSA_SM2_PROVIDER;
+    aigis_path = getenv("AIGIS_PROVIDER");
+    if (aigis_path == NULL || aigis_path[0] == '\0')
+        aigis_path = DEFAULT_AIGIS_PROVIDER;
 
     pqc_prov_default = OSSL_PROVIDER_load(libctx, "default");
     pqc_prov_pqmagic = pqc_load_provider_path(libctx, "pqmagic", pqmagic_path);
     pqc_prov_mldsa_sm2 = pqc_load_provider_path(libctx, "ml_dsa_sm2", mldsa_path);
+    pqc_prov_aigis = pqc_load_provider_path(libctx, "aigis", aigis_path);
 
     if (pqc_prov_default == NULL)
         return 0;
     /*
      * pqmagic：裸 ML-DSA-44-SPKI / ML-KEM-512-SPKI（certs/1）解码与验签；
-     * ml_dsa_sm2：ML-DSA-44-SM2 / ML-KEM-512-SM2 复合 SPKI（certs/2）解析。
+     * ml_dsa_sm2：ML-DSA-44-SM2 / ML-KEM-512-SM2 复合 SPKI（certs/2）解析；
+     * aigis：Aigis-SIG1 / Enc-1 纯/串联 SPKI 解码与验签。
      */
     pqc_prov_loaded_libctx = libctx;
     pqc_builtin_providers_done = 1;
@@ -236,6 +261,7 @@ static void pqc_init_oids(void)
     if (pqc_oids_inited)
         return;
     obj_pqc_pub = OBJ_txt2obj(CV_OID_EXT_PQC_PUB, 1);
+    obj_pqc_sigalg = OBJ_txt2obj(CV_OID_EXT_PQC_SIGALG, 1);
     pqc_oids_inited = 1;
 }
 
@@ -247,6 +273,232 @@ int ossl_x509_is_hybrid_sm2_pqc_cert(const X509 *cert)
     if (!ossl_x509v3_cache_extensions((X509 *)cert))
         return 0;
     return X509_get_ext_by_OBJ(cert, obj_pqc_pub, -1) >= 0;
+}
+
+static int x509_sig_oid_eq(const X509 *cert, const char *oid)
+{
+    const X509_ALGOR *alg = NULL;
+    char buf[80];
+
+    if (cert == NULL || oid == NULL)
+        return 0;
+    X509_get0_signature(NULL, &alg, cert);
+    if (alg == NULL || alg->algorithm == NULL)
+        return 0;
+    if (OBJ_obj2txt(buf, sizeof(buf), alg->algorithm, 1) <= 0)
+        return 0;
+    return strcmp(buf, oid) == 0;
+}
+
+int ossl_x509_is_aigis_sig1_sm2_cert(const X509 *cert)
+{
+    return x509_sig_oid_eq(cert, OSSL_AIGIS_OID_SIG1_SM2_WITH_SM3);
+}
+
+int ossl_x509_hybrid_ext_is_aigis(const X509 *cert)
+{
+    int idx, len;
+    X509_EXTENSION *ext;
+    ASN1_OCTET_STRING *oct;
+    const unsigned char *p, *q;
+    X509_PUBKEY *pubkey = NULL;
+    X509_ALGOR *algor = NULL;
+    const ASN1_OBJECT *oid = NULL;
+    char buf[80];
+
+    pqc_init_oids();
+    if (cert == NULL || obj_pqc_pub == NULL
+        || !ossl_x509_is_hybrid_sm2_pqc_cert(cert))
+        return 0;
+    idx = X509_get_ext_by_OBJ(cert, obj_pqc_pub, -1);
+    if (idx < 0)
+        return 0;
+    ext = X509_get_ext(cert, idx);
+    if (ext == NULL)
+        return 0;
+    oct = X509_EXTENSION_get_data(ext);
+    if (oct == NULL)
+        return 0;
+    p = ASN1_STRING_get0_data(oct);
+    len = ASN1_STRING_length(oct);
+    if (p == NULL || len <= 0)
+        return 0;
+    q = p;
+    /* 扩展内容通常为 SubjectPublicKeyInfo DER */
+    if (d2i_X509_PUBKEY(&pubkey, &q, len) == NULL) {
+        /* 偶发再包一层 OCTET STRING */
+        ASN1_OCTET_STRING *inner = NULL;
+
+        q = p;
+        if (d2i_ASN1_OCTET_STRING(&inner, &q, len) == NULL)
+            return 0;
+        q = ASN1_STRING_get0_data(inner);
+        len = ASN1_STRING_length(inner);
+        if (q == NULL || d2i_X509_PUBKEY(&pubkey, &q, len) == NULL) {
+            ASN1_OCTET_STRING_free(inner);
+            return 0;
+        }
+        ASN1_OCTET_STRING_free(inner);
+    }
+    if (!X509_PUBKEY_get0_param(NULL, NULL, NULL, &algor, pubkey)) {
+        X509_PUBKEY_free(pubkey);
+        return 0;
+    }
+    X509_ALGOR_get0(&oid, NULL, NULL, algor);
+    if (oid == NULL || OBJ_obj2txt(buf, sizeof(buf), oid, 1) <= 0) {
+        X509_PUBKEY_free(pubkey);
+        return 0;
+    }
+    X509_PUBKEY_free(pubkey);
+    return strcmp(buf, "1.2.156.10197.1.306.1") == 0
+        || strcmp(buf, "Aigis-SIG1-SPKI") == 0
+        || strcmp(buf, "1.2.156.10197.1.305.1") == 0
+        || strcmp(buf, "Aigis-Enc-1-SPKI") == 0;
+}
+
+static int pqc_try_load_aigis_so(const char *path)
+{
+    void *h;
+
+    if (path == NULL || path[0] == '\0')
+        return 0;
+    h = x509_pqc_dso_load(path);
+    if (h == NULL)
+        return 0;
+    aigis_verify_pair =
+        (aigis_verify_pair_fn)x509_pqc_dso_sym(h, "aigis_x509_verify_pair");
+    aigis_verify_pair_detail =
+        (aigis_verify_pair_detail_fn)x509_pqc_dso_sym(h,
+                                                       "aigis_x509_verify_pair_detail");
+    if (aigis_verify_pair == NULL) {
+        x509_pqc_dso_unload(h);
+        return 0;
+    }
+    aigis_dso = h;
+    return 1;
+}
+
+static int pqc_bind_aigis(void)
+{
+    const char *so_path;
+
+    if (aigis_bind_attempted)
+        return aigis_bind_ok;
+    aigis_bind_attempted = 1;
+
+    so_path = getenv("AIGIS_PROVIDER");
+    if (so_path == NULL || so_path[0] == '\0')
+        so_path = DEFAULT_AIGIS_PROVIDER;
+    aigis_bind_ok = pqc_try_load_aigis_so(so_path);
+    return aigis_bind_ok;
+}
+
+static const char *aigis_mode_title(int mode)
+{
+    switch (mode) {
+    case 1:
+        return "Aigis-SIG1 纯抗量子证验签";
+    case 2:
+        return "Aigis-SIG1-SM2 复合证 双重验签";
+    case 3:
+        return "国密混合证 Aigis 双重验签";
+    default:
+        return "Aigis 证书验签";
+    }
+}
+
+int ossl_x509_verify_aigis(const X509 *cert, const X509 *issuer,
+                           OSSL_LIB_CTX *libctx)
+{
+    int ok;
+    int mode = 0, aigis_ok = 0, sm2_ok = 0;
+    FILE *out;
+
+    if (cert == NULL || issuer == NULL)
+        return 0;
+    if (!ossl_x509_ensure_pqc_providers(libctx))
+        return 0;
+    if (!pqc_bind_aigis() || aigis_verify_pair == NULL) {
+        if (pqc_info_enabled()) {
+            fprintf(pqc_info_stream(),
+                    "  [aigis] FAIL — 未加载 aigis provider / aigis_x509_verify_pair\n");
+            pqc_info_flush();
+        }
+        return 0;
+    }
+
+    /*
+     * 先探测模式用于进度标题：detect 在 verify 内也会做，这里用签名 OID /
+     * 扩展粗判，避免调用前无 detail。
+     */
+    if (ossl_x509_is_aigis_sig1_sm2_cert(cert))
+        mode = 2;
+    else if (ossl_x509_is_hybrid_sm2_pqc_cert(cert)
+             && ossl_x509_hybrid_ext_is_aigis(cert))
+        mode = 3;
+    else
+        mode = 1;
+
+    if (pqc_info_enabled()) {
+        out = pqc_info_stream();
+        fprintf(out, "\n[openssl-verify %s]\n", aigis_mode_title(mode));
+        pqc_print_subject_line("  证书主体: ", cert);
+        if (mode == 1) {
+            fprintf(out,
+                    "  [1/1] Aigis-SIG1-with-SM3(完整 TBS，签名 %d 字节): 验签中 ...\n",
+                    OSSL_PQC_AIGIS_SIG1_SIG_LEN);
+        } else if (mode == 2) {
+            fprintf(out,
+                    "  [1/2] Aigis-SIG1-with-SM3(完整 TBS，签名前 %d 字节): 验签中 ...\n",
+                    OSSL_PQC_AIGIS_SIG1_SIG_LEN);
+        } else {
+            fprintf(out,
+                    "  [1/2] SM2-with-SM3 外层签名: OK"
+                    " (openssl 标准 X509_verify，完整 TBS 含 4.1.6/7/8)\n");
+            fprintf(out,
+                    "  [2/2] Aigis-SIG1-with-SM3 扩展 4.1.8: 验签中"
+                    " (aigis provider，TBS 去掉 4.1.7/8) ...\n");
+        }
+        fprintf(out, "  [provider] default + aigis 已加载\n");
+        pqc_info_flush();
+    }
+
+    if (aigis_verify_pair_detail != NULL)
+        ok = aigis_verify_pair_detail((X509 *)cert, (X509 *)issuer, libctx,
+                                      &mode, &aigis_ok, &sm2_ok) ? 1 : 0;
+    else
+        ok = aigis_verify_pair((X509 *)cert, (X509 *)issuer, libctx) ? 1 : 0;
+
+    if (pqc_info_enabled()) {
+        out = pqc_info_stream();
+        if (mode == 1) {
+            fprintf(out, "  [1/1] Aigis-SIG1-with-SM3: %s\n",
+                    aigis_ok || ok ? "OK" : "FAIL");
+            fprintf(out, "  => Aigis 验签%s\n\n", ok ? "完成" : "失败");
+        } else if (mode == 2) {
+            fprintf(out, "  [1/2] Aigis-SIG1-with-SM3: %s\n",
+                    aigis_ok ? "OK" : "FAIL");
+            fprintf(out,
+                    "  [2/2] SM2-with-SM3(完整 TBS，签名余下段): %s\n",
+                    sm2_ok ? "OK" : "FAIL");
+            if (ok)
+                fprintf(out, "  => 双重验签完成: Aigis + SM2 均已通过\n\n");
+            else
+                fprintf(out, "  => 复合验签未完成 (Aigis=%d SM2=%d)\n\n",
+                        aigis_ok, sm2_ok);
+        } else {
+            fprintf(out, "  [2/2] Aigis-SIG1-with-SM3 扩展 4.1.8: %s\n",
+                    aigis_ok ? "OK" : "FAIL");
+            if (ok)
+                fprintf(out,
+                        "  => 双重验签完成: 外层 SM2 + 内层 Aigis 均已通过\n\n");
+            else
+                fprintf(out,
+                        "  => 双重验签未完成 (外层 SM2 已通过，内层 Aigis 失败)\n\n");
+        }
+        pqc_info_flush();
+    }
+    return ok;
 }
 
 static int pqc_try_load_cert_verify_so(const char *path)
@@ -465,6 +717,10 @@ int ossl_x509_verify_pqc_hybrid(const X509 *cert, const X509 *issuer,
 
     if (!ossl_x509_is_hybrid_sm2_pqc_cert(cert))
         return 1;
+
+    /* sm2extaigis：扩展内层为 Aigis-SIG1，走 aigis.dll */
+    if (ossl_x509_hybrid_ext_is_aigis(cert))
+        return ossl_x509_verify_aigis(cert, issuer, libctx);
 
     if (pqc_info_enabled()) {
         FILE *out = pqc_info_stream();

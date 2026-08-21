@@ -21,8 +21,11 @@ copy /Y "%TLCP_ROOT%\pqmagic-install\lib\libpqmagic_std.lib" "%TLCP_ROOT%\lib\" 
 copy /Y "%TLCP_ROOT%\pqmagic-algorithms-provider\build\Release\pqmagic.dll" "%TLCP_ROOT%\providers\" >nul
 copy /Y "%TLCP_ROOT%\x509-hybrid-spki-provider\build\Release\libml_dsa_sm2_provider.dll" "%TLCP_ROOT%\providers\" >nul
 copy /Y "%TLCP_ROOT%\x509-hybrid-verify-provider\build\Release\cert_verify.dll" "%TLCP_ROOT%\providers\" >nul
-if exist "%TLCP_ROOT%\ntls-aigis-provider\build\Release\aigis_enc.dll" (
-    copy /Y "%TLCP_ROOT%\ntls-aigis-provider\build\Release\aigis_enc.dll" "%TLCP_ROOT%\providers\" >nul
+if exist "%TLCP_ROOT%\aigis-provider\build\Release\aigis.dll" (
+    copy /Y "%TLCP_ROOT%\aigis-provider\build\Release\aigis.dll" "%TLCP_ROOT%\providers\" >nul
+)
+if exist "%TLCP_ROOT%\aigis-provider\build\Release\aigis_cert_tool.exe" (
+    copy /Y "%TLCP_ROOT%\aigis-provider\build\Release\aigis_cert_tool.exe" "%TLCP_ROOT%\bin\" >nul
 )
 if exist "%TLCP_ROOT%\x509-hybrid-verify-provider\build\Release\verify_certs.exe" (
     copy /Y "%TLCP_ROOT%\x509-hybrid-verify-provider\build\Release\verify_certs.exe" "%TLCP_ROOT%\bin\" >nul
@@ -41,7 +44,7 @@ if not exist "%TLCP_ROOT%\config\openssl-all-providers.cnf" (
         echo pqmagic = pqmagic_sect
         echo ml_dsa_sm2 = ml_dsa_sm2_sect
         echo cert_verify = cert_verify_sect
-        echo aigis_enc = aigis_enc_sect
+        echo aigis = aigis_sect
         echo.
         echo [default_sect]
         echo activate = 1
@@ -58,8 +61,8 @@ if not exist "%TLCP_ROOT%\config\openssl-all-providers.cnf" (
         echo module = D:/20240429certificate-verification/tlcp-pqc/providers/cert_verify.dll
         echo activate = 1
         echo.
-        echo [aigis_enc_sect]
-        echo module = D:/20240429certificate-verification/tlcp-pqc/providers/aigis_enc.dll
+        echo [aigis_sect]
+        echo module = D:/20240429certificate-verification/tlcp-pqc/providers/aigis.dll
         echo activate = 1
     )
 )

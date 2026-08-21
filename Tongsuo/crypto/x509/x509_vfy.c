@@ -1854,6 +1854,10 @@ static int internal_verify(X509_STORE_CTX *ctx)
                 if (!ossl_x509_verify_mldsa44_sm2_composite(xs, xi, xs->libctx))
                     CB_FAIL_IF(1, ctx, xs, n,
                                X509_V_ERR_CERT_SIGNATURE_FAILURE);
+            } else if (ossl_x509_is_aigis_sig1_sm2_cert(xs)) {
+                if (!ossl_x509_verify_aigis(xs, xi, xs->libctx))
+                    CB_FAIL_IF(1, ctx, xs, n,
+                               X509_V_ERR_CERT_SIGNATURE_FAILURE);
             } else if ((pkey = X509_get0_pubkey(xi)) == NULL) {
                 CB_FAIL_IF(1, ctx, xi, issuer_depth,
                            X509_V_ERR_UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY);
