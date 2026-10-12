@@ -107,6 +107,15 @@ int cert_verify_sm2_outer(X509 *cert, X509 *issuer, OSSL_LIB_CTX *libctx);
 /* certs/2：ML-DSA-44-SM2-with-SM3 = ML-DSA(2420) + SM2(余下) 对完整 TBS */
 int cert_verify_mldsa44_sm2_composite(X509 *cert, X509 *issuer, OSSL_LIB_CTX *libctx);
 
+/*
+ * 同一套双重验签，待签名内容和签名由调用方给出（证书 TBS 或 CRL TBS）。
+ * 签发者公钥仍从 issuer 的 ML-DSA-44-SM2 SPKI 拆出。
+ */
+int cert_verify_mldsa44_sm2_over_tbs(X509 *issuer,
+                                     const unsigned char *tbs, size_t tbslen,
+                                     const unsigned char *sig, size_t siglen,
+                                     OSSL_LIB_CTX *libctx);
+
 /* certs/2 CSR：复合自签 PKCS#10，公钥取自 CRI 内 SPKI */
 int cert_verify_is_mldsa44_sm2_req(X509_REQ *req);
 int cert_verify_req_mldsa44_sm2_composite(X509_REQ *req, OSSL_LIB_CTX *libctx);

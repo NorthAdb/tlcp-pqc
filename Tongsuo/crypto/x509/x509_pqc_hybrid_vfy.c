@@ -110,11 +110,19 @@ typedef int (*cv_providers_load_fn)(OSSL_LIB_CTX *libctx);
 typedef int (*cv_mldsa_hybrid_fn)(X509 *cert, X509 *issuer, OSSL_LIB_CTX *libctx);
 typedef int (*cv_mldsa44_sm2_fn)(X509 *cert, X509 *issuer, OSSL_LIB_CTX *libctx);
 typedef int (*cv_req_mldsa44_sm2_fn)(X509_REQ *req, OSSL_LIB_CTX *libctx);
+typedef int (*cv_mldsa44_sm2_tbs_fn)(X509 *issuer,
+                                     const unsigned char *tbs, size_t tbslen,
+                                     const unsigned char *sig, size_t siglen,
+                                     OSSL_LIB_CTX *libctx);
 typedef void (*cv_set_trace_fn)(int enable);
 typedef int (*aigis_verify_pair_fn)(X509 *cert, X509 *issuer, OSSL_LIB_CTX *libctx);
 typedef int (*aigis_verify_pair_detail_fn)(X509 *cert, X509 *issuer,
                                            OSSL_LIB_CTX *libctx, int *mode,
                                            int *aigis_ok, int *sm2_ok);
+typedef int (*aigis_verify_concat_tbs_fn)(X509 *issuer, OSSL_LIB_CTX *libctx,
+                                          const unsigned char *tbs, size_t tbslen,
+                                          const unsigned char *sig, size_t siglen,
+                                          int *aigis_ok, int *sm2_ok);
 
 static ASN1_OBJECT *obj_pqc_pub;
 static ASN1_OBJECT *obj_pqc_sigalg;
@@ -125,6 +133,7 @@ static cv_providers_load_fn cv_providers_load;
 static cv_mldsa_hybrid_fn cv_mldsa_hybrid;
 static cv_mldsa44_sm2_fn cv_mldsa44_sm2;
 static cv_req_mldsa44_sm2_fn cv_req_mldsa44_sm2;
+static cv_mldsa44_sm2_tbs_fn cv_mldsa44_sm2_tbs;
 static cv_set_trace_fn cv_set_trace;
 static int cv_bind_attempted;
 static int cv_bind_ok;
@@ -132,6 +141,7 @@ static int cv_bind_ok;
 static void *aigis_dso;
 static aigis_verify_pair_fn aigis_verify_pair;
 static aigis_verify_pair_detail_fn aigis_verify_pair_detail;
+static aigis_verify_concat_tbs_fn aigis_verify_concat_tbs;
 static int aigis_bind_attempted;
 static int aigis_bind_ok;
 
@@ -219,6 +229,137 @@ static FILE *pqc_info_stream(void)
 {
     /* 与 openssl verify 的 "xxx.crt: OK" 同用 stdout，避免 stderr 在终端里被折叠看不见 */
     return stdout;
+}
+
+static void pqc_info_flush(void);
+static void pqc_print_subject_line(const char *prefix, const X509 *cert);
+static void pqc_print_crl_issuer_line(const char *prefix, const X509_CRL *crl);
+
+static int rpt_with_crl;
+static int rpt_cert_hdr;
+static int rpt_crl_hdr;
+static int rpt_done;
+
+static void sigalg_name(const ASN1_OBJECT *oid, char *buf, size_t buflen)
+{
+    int nid;
+    const char *sn;
+
+    if (buf == NULL || buflen == 0)
+        return;
+    buf[0] = '\0';
+    if (oid == NULL) {
+        strncpy(buf, "未知", buflen - 1);
+        buf[buflen - 1] = '\0';
+        return;
+    }
+    nid = OBJ_obj2nid(oid);
+    sn = nid != NID_undef ? OBJ_nid2sn(nid) : NULL;
+    if (sn != NULL && sn[0] != '\0') {
+        strncpy(buf, sn, buflen - 1);
+        buf[buflen - 1] = '\0';
+        return;
+    }
+    if (OBJ_obj2txt(buf, (int)buflen, oid, 1) <= 0)
+        strncpy(buf, "未知", buflen - 1);
+    buf[buflen - 1] = '\0';
+}
+
+void ossl_x509_vfy_report_reset(int with_crl)
+{
+    rpt_with_crl = with_crl ? 1 : 0;
+    rpt_cert_hdr = 0;
+    rpt_crl_hdr = 0;
+    rpt_done = 0;
+}
+
+void ossl_x509_vfy_report_cert_begin(void)
+{
+    FILE *out;
+
+    if (!pqc_info_enabled() || rpt_cert_hdr || rpt_done)
+        return;
+    rpt_cert_hdr = 1;
+    out = pqc_info_stream();
+    fprintf(out, "\n证书验签\n");
+    pqc_info_flush();
+}
+
+static void ossl_x509_vfy_report_crl_begin(void)
+{
+    FILE *out;
+
+    if (!pqc_info_enabled() || !rpt_with_crl || rpt_crl_hdr || rpt_done)
+        return;
+    rpt_crl_hdr = 1;
+    out = pqc_info_stream();
+    fprintf(out, "\nCRL 验签\n");
+    pqc_info_flush();
+}
+
+void ossl_x509_vfy_report_single_cert(const X509 *cert, int ok)
+{
+    const X509_ALGOR *alg = NULL;
+    char name[80];
+    FILE *out;
+
+    ossl_x509_vfy_report_cert_begin();
+    if (!pqc_info_enabled() || cert == NULL)
+        return;
+    X509_get0_signature(NULL, &alg, cert);
+    sigalg_name(alg != NULL ? alg->algorithm : NULL, name, sizeof(name));
+    out = pqc_info_stream();
+    pqc_print_subject_line("  证书主体: ", cert);
+    fprintf(out, "  形态: 单签名\n");
+    fprintf(out, "  [1/1] %s: %s\n", name, ok ? "OK" : "FAIL");
+    pqc_info_flush();
+}
+
+void ossl_x509_vfy_report_single_crl(const X509_CRL *crl, int ok)
+{
+    const X509_ALGOR *alg = NULL;
+    char name[80];
+    FILE *out;
+
+    ossl_x509_vfy_report_crl_begin();
+    if (!pqc_info_enabled() || !rpt_with_crl || crl == NULL)
+        return;
+    X509_CRL_get0_signature(crl, NULL, &alg);
+    sigalg_name(alg != NULL ? alg->algorithm : NULL, name, sizeof(name));
+    out = pqc_info_stream();
+    pqc_print_crl_issuer_line("  CRL 颁发者: ", crl);
+    fprintf(out, "  形态: 单签名\n");
+    fprintf(out, "  [1/1] %s: %s\n", name, ok ? "OK" : "FAIL");
+    pqc_info_flush();
+}
+
+void ossl_x509_vfy_report_done(int sig_ok, int revoked)
+{
+    FILE *out;
+    int final_ok;
+
+    if (!pqc_info_enabled() || rpt_done)
+        return;
+    if (!rpt_cert_hdr && !rpt_crl_hdr && !rpt_with_crl)
+        return;
+    rpt_done = 1;
+    final_ok = (sig_ok == 1 && revoked != 1);
+    out = pqc_info_stream();
+    fprintf(out, "\n验证结论\n");
+    if (rpt_with_crl) {
+        if (revoked == 1)
+            fprintf(out, "  吊销检查: 已吊销\n");
+        else if (revoked == 0)
+            fprintf(out, "  吊销检查: 未吊销\n");
+        else
+            fprintf(out, "  吊销检查: 未完成\n");
+    }
+    if (sig_ok == 1)
+        fprintf(out, "  签名验证: 通过\n");
+    else if (sig_ok == 0)
+        fprintf(out, "  签名验证: 未通过\n");
+    fprintf(out, "  最终结果: %s\n", final_ok ? "通过" : "不通过");
+    pqc_info_flush();
 }
 
 static void pqc_info_flush(void)
@@ -370,6 +511,9 @@ static int pqc_try_load_aigis_so(const char *path)
     aigis_verify_pair_detail =
         (aigis_verify_pair_detail_fn)x509_pqc_dso_sym(h,
                                                        "aigis_x509_verify_pair_detail");
+    aigis_verify_concat_tbs =
+        (aigis_verify_concat_tbs_fn)x509_pqc_dso_sym(h,
+                                                     "aigis_x509_verify_concat_tbs");
     if (aigis_verify_pair == NULL) {
         x509_pqc_dso_unload(h);
         return 0;
@@ -391,20 +535,6 @@ static int pqc_bind_aigis(void)
         so_path = DEFAULT_AIGIS_PROVIDER;
     aigis_bind_ok = pqc_try_load_aigis_so(so_path);
     return aigis_bind_ok;
-}
-
-static const char *aigis_mode_title(int mode)
-{
-    switch (mode) {
-    case 1:
-        return "Aigis-SIG1 纯抗量子证验签";
-    case 2:
-        return "Aigis-SIG1-SM2 复合证 双重验签";
-    case 3:
-        return "国密混合证 Aigis 双重验签";
-    default:
-        return "Aigis 证书验签";
-    }
 }
 
 int ossl_x509_verify_aigis(const X509 *cert, const X509 *issuer,
@@ -439,10 +569,16 @@ int ossl_x509_verify_aigis(const X509 *cert, const X509 *issuer,
     else
         mode = 1;
 
+    ossl_x509_vfy_report_cert_begin();
     if (pqc_info_enabled()) {
         out = pqc_info_stream();
-        fprintf(out, "\n[openssl-verify %s]\n", aigis_mode_title(mode));
         pqc_print_subject_line("  证书主体: ", cert);
+        if (mode == 1)
+            fprintf(out, "  形态: 单签名\n");
+        else if (mode == 2)
+            fprintf(out, "  形态: 串联（Aigis 与 SM2 签同一份证书）\n");
+        else
+            fprintf(out, "  形态: 扩展（外层 SM2，内层 Aigis 在扩展 4.1.8）\n");
         if (mode == 1) {
             fprintf(out,
                     "  [1/1] Aigis-SIG1-with-SM3(完整 TBS，签名 %d 字节): 验签中 ...\n",
@@ -474,7 +610,7 @@ int ossl_x509_verify_aigis(const X509 *cert, const X509 *issuer,
         if (mode == 1) {
             fprintf(out, "  [1/1] Aigis-SIG1-with-SM3: %s\n",
                     aigis_ok || ok ? "OK" : "FAIL");
-            fprintf(out, "  => Aigis 验签%s\n\n", ok ? "完成" : "失败");
+            fprintf(out, "  => Aigis 签名%s\n\n", ok ? "有效" : "无效");
         } else if (mode == 2) {
             fprintf(out, "  [1/2] Aigis-SIG1-with-SM3: %s\n",
                     aigis_ok ? "OK" : "FAIL");
@@ -482,7 +618,7 @@ int ossl_x509_verify_aigis(const X509 *cert, const X509 *issuer,
                     "  [2/2] SM2-with-SM3(完整 TBS，签名余下段): %s\n",
                     sm2_ok ? "OK" : "FAIL");
             if (ok)
-                fprintf(out, "  => 双重验签完成: Aigis + SM2 均已通过\n\n");
+                fprintf(out, "  => 两段签名均有效: Aigis + SM2\n\n");
             else
                 fprintf(out, "  => 复合验签未完成 (Aigis=%d SM2=%d)\n\n",
                         aigis_ok, sm2_ok);
@@ -491,7 +627,7 @@ int ossl_x509_verify_aigis(const X509 *cert, const X509 *issuer,
                     aigis_ok ? "OK" : "FAIL");
             if (ok)
                 fprintf(out,
-                        "  => 双重验签完成: 外层 SM2 + 内层 Aigis 均已通过\n\n");
+                        "  => 两段签名均有效: 外层 SM2 + 内层 Aigis\n\n");
             else
                 fprintf(out,
                         "  => 双重验签未完成 (外层 SM2 已通过，内层 Aigis 失败)\n\n");
@@ -527,6 +663,9 @@ static int pqc_try_load_cert_verify_so(const char *path)
     cv_req_mldsa44_sm2 =
         (cv_req_mldsa44_sm2_fn)x509_pqc_dso_sym(h,
                                                 "cert_verify_req_mldsa44_sm2_composite");
+    cv_mldsa44_sm2_tbs =
+        (cv_mldsa44_sm2_tbs_fn)x509_pqc_dso_sym(h,
+                                                "cert_verify_mldsa44_sm2_over_tbs");
     cv_set_trace = (cv_set_trace_fn)x509_pqc_dso_sym(h, "cert_verify_set_trace");
     if (cv_providers_load == NULL || cv_mldsa_hybrid == NULL
         || cv_mldsa44_sm2 == NULL || cv_req_mldsa44_sm2 == NULL) {
@@ -616,10 +755,11 @@ int ossl_x509_verify_mldsa44_sm2_composite(const X509 *cert, const X509 *issuer,
     if (!ossl_x509_is_mldsa44_sm2_cert(cert))
         return 0;
 
+    ossl_x509_vfy_report_cert_begin();
     if (pqc_info_enabled()) {
         FILE *out = pqc_info_stream();
-        fprintf(out, "\n[openssl-verify ML-DSA-44-SM2 复合证 双重验签]\n");
         pqc_print_subject_line("  证书主体: ", cert);
+        fprintf(out, "  形态: 串联（ML-DSA 与 SM2 签同一份证书）\n");
         fprintf(out,
                 "  [1/2] ML-DSA-44-with-SM3(完整 TBS，签名前 %d 字节): 验签中 ...\n",
                 OSSL_PQC_MLDSA44_SIG_LEN);
@@ -643,7 +783,7 @@ int ossl_x509_verify_mldsa44_sm2_composite(const X509 *cert, const X509 *issuer,
             fprintf(out, "  [1/2] ML-DSA-44-with-SM3: OK\n");
             fprintf(out, "  [2/2] SM2-with-SM3(完整 TBS，签名余下段): OK\n");
             fprintf(out,
-                    "  => 双重验签完成: ML-DSA + SM2 均已通过\n\n");
+                    "  => 两段签名均有效: ML-DSA + SM2\n\n");
         } else {
             fprintf(out, "  [1/2] ML-DSA-44-with-SM3 或 [2/2] SM2: FAIL\n");
             fprintf(out, "  => 复合验签未完成\n\n");
@@ -690,13 +830,151 @@ int ossl_x509_verify_req_mldsa44_sm2_composite(const X509_REQ *req,
             fprintf(out, "  [1/2] ML-DSA-44-with-SM3: OK\n");
             fprintf(out, "  [2/2] SM2-with-SM3(完整 CRI，签名余下段): OK\n");
             fprintf(out,
-                    "  => 双重验签完成: ML-DSA + SM2 均已通过\n\n");
+                    "  => 两段签名均有效: ML-DSA + SM2\n\n");
         } else {
             fprintf(out, "  [1/2] ML-DSA-44-with-SM3 或 [2/2] SM2: FAIL\n");
             fprintf(out, "  => 复合 CSR 验签未完成\n\n");
         }
         pqc_info_flush();
     }
+    return ok;
+}
+
+static int crl_sig_oid_eq(const X509_CRL *crl, const char *oid)
+{
+    const X509_ALGOR *alg = NULL;
+    char buf[80];
+
+    if (crl == NULL || oid == NULL)
+        return 0;
+    X509_CRL_get0_signature(crl, NULL, &alg);
+    if (alg == NULL || alg->algorithm == NULL)
+        return 0;
+    if (OBJ_obj2txt(buf, sizeof(buf), alg->algorithm, 1) <= 0)
+        return 0;
+    return strcmp(buf, oid) == 0;
+}
+
+static void pqc_print_crl_issuer_line(const char *prefix, const X509_CRL *crl)
+{
+    char *name;
+    FILE *out = pqc_info_stream();
+
+    if (!pqc_info_enabled() || crl == NULL)
+        return;
+    name = X509_NAME_oneline(X509_CRL_get_issuer(crl), NULL, 0);
+    if (name != NULL) {
+        fprintf(out, "%s%s\n", prefix, name);
+        OPENSSL_free(name);
+        pqc_info_flush();
+    }
+}
+
+int ossl_x509_crl_verify_composite(X509_CRL *crl, X509 *issuer,
+                                   OSSL_LIB_CTX *libctx)
+{
+    const ASN1_BIT_STRING *sig = NULL;
+    unsigned char *tbs = NULL;
+    int tbslen;
+    int mldsa;
+    int ok = 0;
+    int aigis_ok = 0, sm2_ok = 0;
+
+    if (crl == NULL || issuer == NULL)
+        return 0;
+    mldsa = X509_CRL_get_signature_nid(crl) == NID_ML_DSA_44_SM2_with_SM3;
+    if (!mldsa && !crl_sig_oid_eq(crl, OSSL_AIGIS_OID_SIG1_SM2_WITH_SM3))
+        return -1;
+
+    tbslen = i2d_X509_CRL_INFO(&crl->crl, &tbs);
+    X509_CRL_get0_signature(crl, &sig, NULL);
+    if (tbslen <= 0 || tbs == NULL || sig == NULL
+        || ASN1_STRING_get0_data(sig) == NULL) {
+        OPENSSL_free(tbs);
+        return 0;
+    }
+
+    if (mldsa) {
+        ossl_x509_vfy_report_crl_begin();
+        if (pqc_info_enabled()) {
+            FILE *out = pqc_info_stream();
+
+            pqc_print_crl_issuer_line("  CRL 颁发者: ", crl);
+            fprintf(out, "  形态: 串联（ML-DSA 与 SM2 签同一份 CRL）\n");
+            fprintf(out,
+                    "  [1/2] ML-DSA-44-with-SM3(完整 CRL TBS，签名前 %d 字节): 验签中 ...\n",
+                    OSSL_PQC_MLDSA44_SIG_LEN);
+            pqc_info_flush();
+        }
+        if (!pqc_ensure_providers(libctx) || cv_mldsa44_sm2_tbs == NULL) {
+            if (pqc_info_enabled()) {
+                fprintf(pqc_info_stream(),
+                        "  [1/2] ML-DSA: FAIL — 未加载 cert_verify 的 CRL 验签\n");
+                pqc_info_flush();
+            }
+            OPENSSL_free(tbs);
+            return 0;
+        }
+        ok = cv_mldsa44_sm2_tbs(issuer, tbs, (size_t)tbslen,
+                                ASN1_STRING_get0_data(sig),
+                                (size_t)ASN1_STRING_length(sig),
+                                libctx) ? 1 : 0;
+        if (pqc_info_enabled()) {
+            FILE *out = pqc_info_stream();
+
+            if (ok) {
+                fprintf(out, "  [1/2] ML-DSA-44-with-SM3: OK\n");
+                fprintf(out, "  [2/2] SM2-with-SM3(完整 CRL TBS，签名余下段): OK\n");
+                fprintf(out, "  => CRL 两段签名均有效: ML-DSA + SM2\n\n");
+            } else {
+                fprintf(out, "  [1/2] ML-DSA-44-with-SM3 或 [2/2] SM2: FAIL\n");
+                fprintf(out, "  => 复合 CRL 验签未完成\n\n");
+            }
+            pqc_info_flush();
+        }
+    } else {
+        ossl_x509_vfy_report_crl_begin();
+        if (pqc_info_enabled()) {
+            FILE *out = pqc_info_stream();
+
+            pqc_print_crl_issuer_line("  CRL 颁发者: ", crl);
+            fprintf(out, "  形态: 串联（Aigis 与 SM2 签同一份 CRL）\n");
+            fprintf(out,
+                    "  [1/2] Aigis-SIG1-with-SM3(完整 CRL TBS，签名前 %d 字节): 验签中 ...\n",
+                    OSSL_PQC_AIGIS_SIG1_SIG_LEN);
+            pqc_info_flush();
+        }
+        if (!ossl_x509_ensure_pqc_providers(libctx) || !pqc_bind_aigis()
+            || aigis_verify_concat_tbs == NULL) {
+            if (pqc_info_enabled()) {
+                fprintf(pqc_info_stream(),
+                        "  [1/2] Aigis: FAIL — 未加载 aigis 的 CRL 验签\n");
+                pqc_info_flush();
+            }
+            OPENSSL_free(tbs);
+            return 0;
+        }
+        ok = aigis_verify_concat_tbs(issuer, libctx, tbs, (size_t)tbslen,
+                                     ASN1_STRING_get0_data(sig),
+                                     (size_t)ASN1_STRING_length(sig),
+                                     &aigis_ok, &sm2_ok) ? 1 : 0;
+        if (pqc_info_enabled()) {
+            FILE *out = pqc_info_stream();
+
+            fprintf(out, "  [1/2] Aigis-SIG1-with-SM3: %s\n",
+                    aigis_ok ? "OK" : "FAIL");
+            fprintf(out, "  [2/2] SM2-with-SM3(完整 CRL TBS，签名余下段): %s\n",
+                    sm2_ok ? "OK" : "FAIL");
+            if (ok)
+                fprintf(out, "  => CRL 两段签名均有效: Aigis + SM2\n\n");
+            else
+                fprintf(out, "  => 复合 CRL 验签未完成 (Aigis=%d SM2=%d)\n\n",
+                        aigis_ok, sm2_ok);
+            pqc_info_flush();
+        }
+    }
+
+    OPENSSL_free(tbs);
     return ok;
 }
 
@@ -722,10 +1000,11 @@ int ossl_x509_verify_pqc_hybrid(const X509 *cert, const X509 *issuer,
     if (ossl_x509_hybrid_ext_is_aigis(cert))
         return ossl_x509_verify_aigis(cert, issuer, libctx);
 
+    ossl_x509_vfy_report_cert_begin();
     if (pqc_info_enabled()) {
         FILE *out = pqc_info_stream();
-        fprintf(out, "\n[openssl-verify 国密混合证 双重验签]\n");
         pqc_print_subject_line("  证书主体: ", cert);
+        fprintf(out, "  形态: 扩展（外层 SM2，内层 ML-DSA 在扩展 4.1.8）\n");
         fprintf(out,
                 "  [1/2] SM2-with-SM3 外层签名: OK"
                 " (openssl 标准 X509_verify，完整 TBS 含 4.1.6/7/8)\n");
@@ -751,7 +1030,7 @@ int ossl_x509_verify_pqc_hybrid(const X509 *cert, const X509 *issuer,
         if (mldsa_ok) {
             fprintf(out, "  [2/2] ML-DSA-44-with-SM3 扩展 4.1.8: OK\n");
             fprintf(out,
-                    "  => 双重验签完成: 外层 SM2 + 内层 ML-DSA 均已通过\n\n");
+                    "  => 两段签名均有效: 外层 SM2 + 内层 ML-DSA\n\n");
         } else {
             fprintf(out, "  [2/2] ML-DSA-44-with-SM3 扩展 4.1.8: FAIL\n");
             fprintf(out,

@@ -103,6 +103,15 @@ AIGIS_CERT_API int aigis_x509_verify_pair_detail(X509 *cert, X509 *issuer,
                                                  int *mode, int *aigis_ok,
                                                  int *sm2_ok);
 
+/*
+ * 串联双重验签，消息和签名由调用方给出（证书 TBS 或 CRL TBS）。
+ * 签名布局与证书相同：前 AIGIS_SIG1_SIG_LEN 字节为 Aigis，余下为 SM2。
+ */
+AIGIS_CERT_API int aigis_x509_verify_concat_tbs(X509 *issuer, OSSL_LIB_CTX *libctx,
+                                                const unsigned char *tbs, size_t tbslen,
+                                                const unsigned char *sig, size_t siglen,
+                                                int *aigis_ok, int *sm2_ok);
+
 AIGIS_CERT_API void aigis_cert_set_trace(int enable);
 
 #endif /* AIGIS_CERT_H */

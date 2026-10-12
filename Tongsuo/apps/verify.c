@@ -289,7 +289,7 @@ static int check(X509_STORE *ctx, const char *file,
                  STACK_OF(OPENSSL_STRING) *opts)
 {
     X509 *x = NULL;
-    int i = 0, ret = 0;
+    int i = 0, ret = 0, print_queue = 1;
     X509_STORE_CTX *csc;
     STACK_OF(X509) *chain = NULL;
     int num_untrusted;
@@ -344,12 +344,21 @@ static int check(X509_STORE *ctx, const char *file,
         BIO_printf(bio_err,
                    "error %s: verification failed\n",
                    (file == NULL) ? "stdin" : file);
+        /*
+         * 回调已经打印了 certificate revoked 等验链原因。
+         * 队列里剩下的是默认证书目录打开失败等残留，不再重复打出。
+         */
+        if (X509_STORE_CTX_get_error(csc) != X509_V_OK
+            && X509_STORE_CTX_get_error(csc) != X509_V_ERR_UNSPECIFIED)
+            print_queue = 0;
     }
     X509_STORE_CTX_free(csc);
 
  end:
-    if (i <= 0)
+    if (i <= 0 && print_queue)
         ERR_print_errors(bio_err);
+    else
+        ERR_clear_error();
     X509_free(x);
 
     return ret;

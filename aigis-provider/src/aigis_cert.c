@@ -521,23 +521,56 @@ static int verify_pure(X509 *cert, X509 *issuer, AIGIS_VERIFY_RESULT *res)
     return res->ok;
 }
 
-static int verify_concat(X509 *cert, X509 *issuer, OSSL_LIB_CTX *libctx,
-                         AIGIS_VERIFY_RESULT *res)
+static int verify_concat_tbs(X509 *issuer, OSSL_LIB_CTX *libctx,
+                             const unsigned char *tbs, size_t tbslen,
+                             const unsigned char *sig, size_t siglen,
+                             AIGIS_VERIFY_RESULT *res)
 {
     AIGIS_PUBKEY iss;
-    unsigned char *tbs = NULL;
-    int tbslen = 0;
-    const ASN1_BIT_STRING *outer = NULL;
-    size_t outer_len, sm2_sig_len;
+    size_t sm2_sig_len;
     EC_KEY *ec = NULL;
-    const unsigned char *osig;
 
-    (void)libctx;
+    if (tbs == NULL || sig == NULL || tbslen == 0) {
+        snprintf(res->err, sizeof(res->err), "串联验签材料不足");
+        return 0;
+    }
     if (!aigis_cert_extract_subject_pubkey(issuer, &iss)
         || !iss.is_sig || iss.sm2_pk_len != AIGIS_SM2_PK_LEN) {
         snprintf(res->err, sizeof(res->err), "签发者不是 Aigis-SIG1-SM2 串联公钥");
         return 0;
     }
+    if (siglen <= AIGIS_SIG1_SIG_LEN) {
+        snprintf(res->err, sizeof(res->err), "串联外层签名过短");
+        return 0;
+    }
+    sm2_sig_len = siglen - AIGIS_SIG1_SIG_LEN;
+    res->aigis_ok = aigis_sig1_sm3_verify(iss.aigis_pk, iss.aigis_pk_len, tbs,
+                                          tbslen, sig, AIGIS_SIG1_SIG_LEN);
+    TR("concat Aigis verify -> %d", res->aigis_ok);
+    ec = sm2_from_raw(iss.sm2_pk, iss.sm2_pk_len);
+    if (ec == NULL) {
+        snprintf(res->err, sizeof(res->err), "签发者 SM2 公钥解析失败");
+        return 0;
+    }
+    res->sm2_ok = sm2_sm3_verify(libctx, ec, tbs, tbslen,
+                                 sig + AIGIS_SIG1_SIG_LEN, sm2_sig_len);
+    TR("concat SM2 verify -> %d", res->sm2_ok);
+    res->ok = res->aigis_ok && res->sm2_ok;
+    if (!res->ok)
+        snprintf(res->err, sizeof(res->err),
+                 "Aigis-SIG1-SM2-with-SM3(510.1) 验签失败 (aigis=%d sm2=%d)",
+                 res->aigis_ok, res->sm2_ok);
+    return res->ok;
+}
+
+static int verify_concat(X509 *cert, X509 *issuer, OSSL_LIB_CTX *libctx,
+                         AIGIS_VERIFY_RESULT *res)
+{
+    unsigned char *tbs = NULL;
+    int tbslen = 0;
+    const ASN1_BIT_STRING *outer = NULL;
+    int ok;
+
     if (!tbs_bytes(cert, &tbs, &tbslen)) {
         snprintf(res->err, sizeof(res->err), "导出 TBS 失败");
         return 0;
@@ -547,33 +580,11 @@ static int verify_concat(X509 *cert, X509 *issuer, OSSL_LIB_CTX *libctx,
         OPENSSL_free(tbs);
         return 0;
     }
-    outer_len = (size_t)ASN1_STRING_length(outer);
-    if (outer_len <= AIGIS_SIG1_SIG_LEN) {
-        OPENSSL_free(tbs);
-        snprintf(res->err, sizeof(res->err), "串联外层签名过短");
-        return 0;
-    }
-    osig = ASN1_STRING_get0_data(outer);
-    sm2_sig_len = outer_len - AIGIS_SIG1_SIG_LEN;
-    res->aigis_ok = aigis_sig1_sm3_verify(iss.aigis_pk, iss.aigis_pk_len, tbs,
-                                          (size_t)tbslen, osig, AIGIS_SIG1_SIG_LEN);
-    TR("concat Aigis verify -> %d", res->aigis_ok);
-    ec = sm2_from_raw(iss.sm2_pk, iss.sm2_pk_len);
-    if (ec == NULL) {
-        OPENSSL_free(tbs);
-        snprintf(res->err, sizeof(res->err), "签发者 SM2 公钥解析失败");
-        return 0;
-    }
-    res->sm2_ok = sm2_sm3_verify(libctx, ec, tbs, (size_t)tbslen,
-                                 osig + AIGIS_SIG1_SIG_LEN, sm2_sig_len);
-    TR("concat SM2 verify -> %d", res->sm2_ok);
+    ok = verify_concat_tbs(issuer, libctx, tbs, (size_t)tbslen,
+                           ASN1_STRING_get0_data(outer),
+                           (size_t)ASN1_STRING_length(outer), res);
     OPENSSL_free(tbs);
-    res->ok = res->aigis_ok && res->sm2_ok;
-    if (!res->ok)
-        snprintf(res->err, sizeof(res->err),
-                 "Aigis-SIG1-SM2-with-SM3(510.1) 验签失败 (aigis=%d sm2=%d)",
-                 res->aigis_ok, res->sm2_ok);
-    return res->ok;
+    return ok;
 }
 
 static int verify_ext(X509 *cert, X509 *issuer, OSSL_LIB_CTX *libctx,
@@ -728,6 +739,23 @@ int aigis_x509_verify_pair(X509 *cert, X509 *issuer, OSSL_LIB_CTX *libctx)
     AIGIS_VERIFY_RESULT res;
 
     return aigis_cert_verify_one(cert, issuer, &res, libctx);
+}
+
+int aigis_x509_verify_concat_tbs(X509 *issuer, OSSL_LIB_CTX *libctx,
+                                    const unsigned char *tbs, size_t tbslen,
+                                    const unsigned char *sig, size_t siglen,
+                                    int *aigis_ok, int *sm2_ok)
+{
+    AIGIS_VERIFY_RESULT res;
+    int ok;
+
+    memset(&res, 0, sizeof(res));
+    ok = verify_concat_tbs(issuer, libctx, tbs, tbslen, sig, siglen, &res);
+    if (aigis_ok != NULL)
+        *aigis_ok = res.aigis_ok;
+    if (sm2_ok != NULL)
+        *sm2_ok = res.sm2_ok;
+    return ok;
 }
 
 int aigis_x509_verify_pair_detail(X509 *cert, X509 *issuer, OSSL_LIB_CTX *libctx,

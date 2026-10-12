@@ -214,13 +214,26 @@ static int verify_chain(X509_STORE_CTX *ctx)
     int err;
     int ok;
 
+    if (ctx->parent == NULL)
+        ossl_x509_vfy_report_reset(
+            (ctx->param->flags & X509_V_FLAG_CRL_CHECK) != 0);
+
     if ((ok = build_chain(ctx)) <= 0
         || (ok = check_extensions(ctx)) <= 0
         || (ok = check_auth_level(ctx)) <= 0
         || (ok = check_id(ctx)) <= 0
-        || (ok = X509_get_pubkey_parameters(NULL, ctx->chain) ? 1 : -1) <= 0
-        || (ok = ctx->check_revocation(ctx)) <= 0)
+        || (ok = X509_get_pubkey_parameters(NULL, ctx->chain) ? 1 : -1) <= 0)
         return ok;
+
+    /*
+     * 与 OpenSSL 相同：先查吊销。CRL 有效且证书已吊销时直接返回，
+     * 不再做 internal_verify 的各级证书签名验签。
+     */
+    if ((ok = ctx->check_revocation(ctx)) <= 0) {
+        if (ctx->parent == NULL && ctx->error != X509_V_ERR_CERT_REVOKED)
+            ossl_x509_vfy_report_done(-1, -1);
+        return ok;
+    }
 
     err = X509_chain_check_suiteb(&ctx->error_depth, NULL, ctx->chain,
                                   ctx->param->flags);
@@ -228,8 +241,12 @@ static int verify_chain(X509_STORE_CTX *ctx)
 
     /* Verify chain signatures and expiration times */
     ok = ctx->verify != NULL ? ctx->verify(ctx) : internal_verify(ctx);
-    if (ok <= 0)
+    if (ok <= 0) {
+        if (ctx->parent == NULL)
+            ossl_x509_vfy_report_done(0,
+                (ctx->param->flags & X509_V_FLAG_CRL_CHECK) != 0 ? 0 : -1);
         return ok;
+    }
 
     if ((ok = check_name_constraints(ctx)) <= 0)
         return ok;
@@ -245,6 +262,9 @@ static int verify_chain(X509_STORE_CTX *ctx)
     /* If we get this far evaluate policies */
     if ((ctx->param->flags & X509_V_FLAG_POLICY_CHECK) != 0)
         ok = ctx->check_policy(ctx);
+    if (ctx->parent == NULL && ok > 0)
+        ossl_x509_vfy_report_done(1,
+            (ctx->param->flags & X509_V_FLAG_CRL_CHECK) != 0 ? 0 : -1);
     return ok;
 }
 
@@ -1591,6 +1611,21 @@ static int check_crl(X509_STORE_CTX *ctx, X509_CRL *crl)
         !check_crl_time(ctx, crl, 1))
         return 0;
 
+    /*
+     * 串联 CRL（ML-DSA-44-SM2 / Aigis-SIG1-SM2）不能走 X509_CRL_verify。
+     * 返回 -1 表示不是这两种签名，继续原来的验签。
+     */
+    {
+        int composite = ossl_x509_crl_verify_composite(crl, issuer, issuer->libctx);
+
+        if (composite >= 0) {
+            if (composite <= 0 &&
+                !verify_cb_crl(ctx, X509_V_ERR_CRL_SIGNATURE_FAILURE))
+                return 0;
+            return 1;
+        }
+    }
+
     /* Attempt to get issuer certificate public key */
     ikey = X509_get0_pubkey(issuer);
     if (ikey == NULL &&
@@ -1603,9 +1638,14 @@ static int check_crl(X509_STORE_CTX *ctx, X509_CRL *crl)
         if (rv != X509_V_OK && !verify_cb_crl(ctx, rv))
             return 0;
         /* Verify CRL signature */
-        if (X509_CRL_verify(crl, ikey) <= 0 &&
-            !verify_cb_crl(ctx, X509_V_ERR_CRL_SIGNATURE_FAILURE))
-            return 0;
+        {
+            int crl_ok = X509_CRL_verify(crl, ikey) > 0;
+
+            ossl_x509_vfy_report_single_crl(crl, crl_ok);
+            if (!crl_ok &&
+                !verify_cb_crl(ctx, X509_V_ERR_CRL_SIGNATURE_FAILURE))
+                return 0;
+        }
     }
     return 1;
 }
@@ -1632,6 +1672,8 @@ static int cert_crl(X509_STORE_CTX *ctx, X509_CRL *crl, X509 *x)
     if (X509_CRL_get0_by_cert(crl, &rev, x)) {
         if (rev->reason == CRL_REASON_REMOVE_FROM_CRL)
             return 2;
+        if (ctx->parent == NULL)
+            ossl_x509_vfy_report_done(-1, 1);
         if (!verify_cb_crl(ctx, X509_V_ERR_CERT_REVOKED))
             return 0;
     }
@@ -1896,11 +1938,16 @@ static int internal_verify(X509_STORE_CTX *ctx)
                 ret = X509_verify_ctx(xs, mctx);
 
                 EVP_MD_CTX_free(mctx);
+                if (ret <= 0 && !ossl_x509_is_hybrid_sm2_pqc_cert(xs))
+                    ossl_x509_vfy_report_single_cert(xs, 0);
                 CB_FAIL_IF(ret <= 0,
                            ctx, xs, n, X509_V_ERR_CERT_SIGNATURE_FAILURE);
-                if (!ossl_x509_verify_pqc_hybrid(xs, xi, xs->libctx))
+                if (!ossl_x509_verify_pqc_hybrid(xs, xi, xs->libctx)) {
                     CB_FAIL_IF(1, ctx, xs, n,
                                X509_V_ERR_CERT_SIGNATURE_FAILURE);
+                } else if (!ossl_x509_is_hybrid_sm2_pqc_cert(xs)) {
+                    ossl_x509_vfy_report_single_cert(xs, 1);
+                }
             }
         }
 

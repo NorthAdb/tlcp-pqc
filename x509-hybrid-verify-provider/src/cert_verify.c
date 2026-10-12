@@ -1120,21 +1120,21 @@ int cert_verify_sm2_full_tbs(X509 *cert, X509 *issuer, OSSL_LIB_CTX *libctx)
     return cert_verify_sm2_outer(cert, issuer, libctx);
 }
 
-int cert_verify_mldsa44_sm2_composite(X509 *cert, X509 *issuer, OSSL_LIB_CTX *libctx)
+int cert_verify_mldsa44_sm2_over_tbs(X509 *issuer,
+                                     const unsigned char *tbs, size_t tbslen,
+                                     const unsigned char *sig, size_t siglen,
+                                     OSSL_LIB_CTX *libctx)
 {
     unsigned char mldsa_pk[CERT_VERIFY_MLDSA44_PK_LEN];
     unsigned char sm2_pk[65];
     size_t mldsa_len = 0, sm2_len = 0;
-    unsigned char *tbs = NULL;
-    int tbslen = 0;
-    const ASN1_BIT_STRING *outer_sig = NULL;
     EVP_PKEY *issuer_mldsa = NULL;
     EC_KEY *issuer_sm2 = NULL;
     size_t sm2_sig_len;
     int ok = 0;
 
-    CV_TRACE("--- cert_verify_mldsa44_sm2_composite (certs/2) ---");
-    if (!cert_verify_is_mldsa44_sm2(cert))
+    CV_TRACE("--- cert_verify_mldsa44_sm2_over_tbs ---");
+    if (issuer == NULL || tbs == NULL || sig == NULL || tbslen == 0)
         return 0;
     if (!parse_mldsa44_sm2_spki_raw(issuer, mldsa_pk, sizeof(mldsa_pk), &mldsa_len,
                                     sm2_pk, sizeof(sm2_pk), &sm2_len)) {
@@ -1147,26 +1147,20 @@ int cert_verify_mldsa44_sm2_composite(X509 *cert, X509 *issuer, OSSL_LIB_CTX *li
         CV_TRACE("  导入签发者 ML-DSA/SM2 公钥失败");
         goto end;
     }
-    if (!tbs_bytes(cert, &tbs, &tbslen))
-        goto end;
-    X509_get0_signature(&outer_sig, NULL, cert);
-    if (outer_sig == NULL
-        || (size_t)ASN1_STRING_length(outer_sig) <= CERT_VERIFY_MLDSA44_SIG_LEN) {
+    if (siglen <= CERT_VERIFY_MLDSA44_SIG_LEN) {
         CV_TRACE("  外层签名长度无效");
         goto end;
     }
-    sm2_sig_len = (size_t)ASN1_STRING_length(outer_sig) - CERT_VERIFY_MLDSA44_SIG_LEN;
-    CV_TRACE("  ML-DSA 段 %d 字节 + SM2 段 %zu 字节，TBS %d 字节",
+    sm2_sig_len = siglen - CERT_VERIFY_MLDSA44_SIG_LEN;
+    CV_TRACE("  ML-DSA 段 %d 字节 + SM2 段 %zu 字节，TBS %zu 字节",
              CERT_VERIFY_MLDSA44_SIG_LEN, sm2_sig_len, tbslen);
-    ok = mldsa44_with_sm3_verify(libctx, issuer_mldsa, tbs, (size_t)tbslen,
-                                 ASN1_STRING_get0_data(outer_sig),
-                                 CERT_VERIFY_MLDSA44_SIG_LEN);
+    ok = mldsa44_with_sm3_verify(libctx, issuer_mldsa, tbs, tbslen,
+                                 sig, CERT_VERIFY_MLDSA44_SIG_LEN);
     CV_TRACE("  ML-DSA-44-with-SM3(完整TBS) -> %s", ok ? "OK" : "FAIL");
     if (!ok)
         goto end;
-    ok = sm2_with_sm3_verify_ec(libctx, issuer_sm2, tbs, (size_t)tbslen,
-                               ASN1_STRING_get0_data(outer_sig)
-                                   + CERT_VERIFY_MLDSA44_SIG_LEN,
+    ok = sm2_with_sm3_verify_ec(libctx, issuer_sm2, tbs, tbslen,
+                               sig + CERT_VERIFY_MLDSA44_SIG_LEN,
                                sm2_sig_len);
     issuer_sm2 = NULL;
     CV_TRACE("  SM2-with-SM3(完整TBS) -> %s", ok ? "OK" : "FAIL");
@@ -1174,6 +1168,30 @@ int cert_verify_mldsa44_sm2_composite(X509 *cert, X509 *issuer, OSSL_LIB_CTX *li
 end:
     EVP_PKEY_free(issuer_mldsa);
     EC_KEY_free(issuer_sm2);
+    return ok;
+}
+
+int cert_verify_mldsa44_sm2_composite(X509 *cert, X509 *issuer, OSSL_LIB_CTX *libctx)
+{
+    unsigned char *tbs = NULL;
+    int tbslen = 0;
+    const ASN1_BIT_STRING *outer_sig = NULL;
+    int ok = 0;
+
+    CV_TRACE("--- cert_verify_mldsa44_sm2_composite (certs/2) ---");
+    if (!cert_verify_is_mldsa44_sm2(cert))
+        return 0;
+    if (!tbs_bytes(cert, &tbs, &tbslen))
+        return 0;
+    X509_get0_signature(&outer_sig, NULL, cert);
+    if (outer_sig == NULL) {
+        OPENSSL_free(tbs);
+        return 0;
+    }
+    ok = cert_verify_mldsa44_sm2_over_tbs(issuer, tbs, (size_t)tbslen,
+                                          ASN1_STRING_get0_data(outer_sig),
+                                          (size_t)ASN1_STRING_length(outer_sig),
+                                          libctx);
     OPENSSL_free(tbs);
     return ok;
 }

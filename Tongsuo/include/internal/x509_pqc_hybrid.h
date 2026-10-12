@@ -54,6 +54,24 @@ int ossl_x509_verify_mldsa44_sm2_composite(const X509 *cert, const X509 *issuer,
 int ossl_x509_verify_aigis(const X509 *cert, const X509 *issuer,
                            OSSL_LIB_CTX *libctx);
 
+/*
+ * 串联 CRL 双重验签（ML-DSA-44-SM2-with-SM3 或 Aigis-SIG1-SM2-with-SM3）。
+ * 返回 1 验过，0 验失败，-1 不是这两种签名（调用方走原来的 X509_CRL_verify）。
+ */
+int ossl_x509_crl_verify_composite(X509_CRL *crl, X509 *issuer,
+                                   OSSL_LIB_CTX *libctx);
+
+/*
+ * 验链进度按实际执行顺序打印，不预排段数。
+ * sig_ok: 1 签名已验且通过，0 已验且失败，-1 尚未验签名。
+ * revoked: 1 已吊销，0 已查且未吊销，-1 吊销检查未完成或不适用。
+ */
+void ossl_x509_vfy_report_reset(int with_crl);
+void ossl_x509_vfy_report_cert_begin(void);
+void ossl_x509_vfy_report_single_cert(const X509 *cert, int ok);
+void ossl_x509_vfy_report_single_crl(const X509_CRL *crl, int ok);
+void ossl_x509_vfy_report_done(int sig_ok, int revoked);
+
 /* 混合扩展证内层是否为 Aigis-SIG1（扩展 4.1.7） */
 int ossl_x509_hybrid_ext_is_aigis(const X509 *cert);
 
