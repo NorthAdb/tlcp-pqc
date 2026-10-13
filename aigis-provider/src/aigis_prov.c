@@ -22,6 +22,7 @@
 #include <openssl/evp.h>
 #include <openssl/objects.h>
 #include <openssl/params.h>
+#include <openssl/pem.h>
 #include <openssl/provider.h>
 #include <openssl/x509.h>
 
@@ -55,6 +56,8 @@ struct aigis_sig_ctx {
     unsigned char *acc;
     size_t acc_len;
     size_t acc_cap;
+    unsigned char aid_buf[128];
+    size_t aid_len;
 };
 
 struct spki_dec_ctx {
@@ -117,6 +120,13 @@ static const OSSL_PARAM aigis_import_pub[] = {
 
 static const OSSL_PARAM aigis_import_priv[] = {
     OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PRIV_KEY, NULL, 0),
+    OSSL_PARAM_END
+};
+
+/* 私钥导出同时带上公钥，供 PKCS#8 写成 SK‖PK，解码后 req -new 能还原 SPKI */
+static const OSSL_PARAM aigis_export_keypair[] = {
+    OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PRIV_KEY, NULL, 0),
+    OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY, NULL, 0),
     OSSL_PARAM_END
 };
 
@@ -209,14 +219,46 @@ static int aigis_km_export(void *keydata, int selection,
                            OSSL_CALLBACK *param_cb, void *cbarg)
 {
     struct aigis_key *k = keydata;
-    OSSL_PARAM params[2];
+    OSSL_PARAM params[3];
+    unsigned char priv[AIGIS_SIG1_SK_PK_LEN];
+    size_t priv_len = 0;
+    int n = 0;
 
-    if ((selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) == 0 || k->pk_len == 0)
+    if (k == NULL)
         return 0;
-    params[0] = OSSL_PARAM_construct_octet_string(
-        OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY, k->pk, k->pk_len);
-    params[1] = OSSL_PARAM_construct_end();
+    if ((selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) != 0 && k->sk_len > 0) {
+        if (k->is_sig && !k->is_hybrid
+            && k->sk_len == AIGIS_SIG1_SK_LEN
+            && k->pk_len == AIGIS_SIG1_PK_LEN) {
+            memcpy(priv, k->sk, AIGIS_SIG1_SK_LEN);
+            memcpy(priv + AIGIS_SIG1_SK_LEN, k->pk, AIGIS_SIG1_PK_LEN);
+            priv_len = AIGIS_SIG1_SK_PK_LEN;
+        } else if (k->sk_len <= sizeof(priv)) {
+            memcpy(priv, k->sk, k->sk_len);
+            priv_len = k->sk_len;
+        } else {
+            return 0;
+        }
+        params[n++] = OSSL_PARAM_construct_octet_string(
+            OSSL_PKEY_PARAM_PRIV_KEY, priv, priv_len);
+    }
+    if ((selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) != 0 && k->pk_len > 0) {
+        params[n++] = OSSL_PARAM_construct_octet_string(
+            OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY, (void *)k->pk, k->pk_len);
+    }
+    if (n == 0)
+        return 0;
+    params[n] = OSSL_PARAM_construct_end();
     return param_cb(params, cbarg);
+}
+
+static const OSSL_PARAM *aigis_sig_export_types(int selection)
+{
+    if ((selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) != 0)
+        return aigis_export_keypair;
+    if ((selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) != 0)
+        return aigis_import_pub;
+    return NULL;
 }
 
 static const OSSL_PARAM aigis_gettable[] = {
@@ -408,6 +450,66 @@ static int aigis_sig_verify_final(void *vctx, const unsigned char *sig,
     return r == 0;
 }
 
+static int aigis_sig_build_aid(struct aigis_sig_ctx *ctx)
+{
+    X509_ALGOR *algor = NULL;
+    ASN1_OBJECT *oid = NULL;
+    unsigned char *der = NULL;
+    int len;
+
+    if (ctx == NULL)
+        return 0;
+    ctx->aid_len = 0;
+    oid = OBJ_txt2obj(OID_SIG1_WITH_SM3, 1);
+    algor = X509_ALGOR_new();
+    if (oid == NULL || algor == NULL)
+        goto end;
+    if (!X509_ALGOR_set0(algor, oid, V_ASN1_UNDEF, NULL))
+        goto end;
+    oid = NULL;
+    len = i2d_X509_ALGOR(algor, &der);
+    if (len <= 0 || (size_t)len > sizeof(ctx->aid_buf))
+        goto end;
+    memcpy(ctx->aid_buf, der, (size_t)len);
+    ctx->aid_len = (size_t)len;
+end:
+    ASN1_OBJECT_free(oid);
+    OPENSSL_free(der);
+    X509_ALGOR_free(algor);
+    return ctx->aid_len > 0;
+}
+
+static const OSSL_PARAM aigis_sig_gettable_ctx_params[] = {
+    OSSL_PARAM_octet_string(OSSL_SIGNATURE_PARAM_ALGORITHM_ID, NULL, 0),
+    OSSL_PARAM_END
+};
+
+static const OSSL_PARAM *aigis_sig_gettable_ctx_params_fn(void *vctx,
+                                                         void *provctx)
+{
+    (void)vctx;
+    (void)provctx;
+    return aigis_sig_gettable_ctx_params;
+}
+
+static int aigis_sig_get_ctx_params(void *vctx, OSSL_PARAM *params)
+{
+    struct aigis_sig_ctx *ctx = vctx;
+    OSSL_PARAM *p;
+
+    if (ctx == NULL)
+        return 0;
+    if (params == NULL)
+        return 1;
+    p = OSSL_PARAM_locate(params, OSSL_SIGNATURE_PARAM_ALGORITHM_ID);
+    if (p != NULL
+        && !OSSL_PARAM_set_octet_string(p,
+                                        ctx->aid_len == 0 ? NULL : ctx->aid_buf,
+                                        ctx->aid_len))
+        return 0;
+    return 1;
+}
+
 static int aigis_sig_sign_init(void *vctx, const char *mdname, void *provkey,
                                const OSSL_PARAM *params)
 {
@@ -415,16 +517,16 @@ static int aigis_sig_sign_init(void *vctx, const char *mdname, void *provkey,
     struct aigis_key *k = provkey;
 
     (void)params;
+    /* req -new 常传入默认摘要名；签名在 final 里固定对原文做 SM3 */
+    (void)mdname;
     if (ctx == NULL || k == NULL || k->sk_len != AIGIS_SIG1_SK_LEN)
-        return 0;
-    if (mdname != NULL && OPENSSL_strcasecmp(mdname, "sm3") != 0)
         return 0;
     ctx->key = k;
     ctx->acc_len = 0;
     OPENSSL_free(ctx->acc);
     ctx->acc = NULL;
     ctx->acc_cap = 0;
-    return 1;
+    return aigis_sig_build_aid(ctx);
 }
 
 static int aigis_sig_sign_update(void *vctx, const unsigned char *data,
@@ -456,6 +558,43 @@ static int aigis_sig_sign_final(void *vctx, unsigned char *sig, size_t *siglen,
         return 0;
     if (!EVP_DigestInit_ex(mdc, EVP_sm3(), NULL)
         || !EVP_DigestUpdate(mdc, ctx->acc, ctx->acc_len)
+        || !EVP_DigestFinal_ex(mdc, sm3, &sm3_len)) {
+        EVP_MD_CTX_free(mdc);
+        return 0;
+    }
+    EVP_MD_CTX_free(mdc);
+    r = pqmagic_aigis_sig1_std_signature_internal(sig, &slen, sm3, 32,
+                                                  ctx->key->sk);
+    if (r != 0 || slen != AIGIS_SIG1_SIG_LEN)
+        return 0;
+    *siglen = slen;
+    return 1;
+}
+
+static int aigis_sig_digest_sign(void *vctx, unsigned char *sig, size_t *siglen,
+                                 size_t sigsize, const unsigned char *data,
+                                 size_t datalen)
+{
+    struct aigis_sig_ctx *ctx = vctx;
+    unsigned char sm3[32];
+    unsigned int sm3_len = sizeof(sm3);
+    EVP_MD_CTX *mdc;
+    size_t slen = AIGIS_SIG1_SIG_LEN;
+    int r;
+
+    if (ctx == NULL || ctx->key == NULL || data == NULL)
+        return 0;
+    if (sig == NULL) {
+        *siglen = AIGIS_SIG1_SIG_LEN;
+        return 1;
+    }
+    if (sigsize < AIGIS_SIG1_SIG_LEN)
+        return 0;
+    mdc = EVP_MD_CTX_new();
+    if (mdc == NULL)
+        return 0;
+    if (!EVP_DigestInit_ex(mdc, EVP_sm3(), NULL)
+        || !EVP_DigestUpdate(mdc, data, datalen)
         || !EVP_DigestFinal_ex(mdc, sm3, &sm3_len)) {
         EVP_MD_CTX_free(mdc);
         return 0;
@@ -870,6 +1009,57 @@ static int text_encode(void *vctx, OSSL_CORE_BIO *cout, const void *key,
 
 /* ---------- dispatch tables ---------- */
 
+struct aigis_gen_ctx {
+    int selection;
+};
+
+static void *aigis_gen_init(void *provctx, int selection,
+                            const OSSL_PARAM params[])
+{
+    struct aigis_gen_ctx *gctx;
+
+    (void)provctx;
+    (void)params;
+    if ((selection & (OSSL_KEYMGMT_SELECT_KEYPAIR
+                      | OSSL_KEYMGMT_SELECT_PRIVATE_KEY
+                      | OSSL_KEYMGMT_SELECT_PUBLIC_KEY)) == 0)
+        return NULL;
+    gctx = OPENSSL_zalloc(sizeof(*gctx));
+    if (gctx != NULL)
+        gctx->selection = selection;
+    return gctx;
+}
+
+static void aigis_gen_cleanup(void *genctx)
+{
+    OPENSSL_free(genctx);
+}
+
+static void *aigis_sig_gen(void *genctx, OSSL_CALLBACK *osslcb, void *cbarg)
+{
+    struct aigis_gen_ctx *gctx = genctx;
+    struct aigis_key *key;
+
+    (void)osslcb;
+    (void)cbarg;
+    if (gctx == NULL)
+        return NULL;
+    key = OPENSSL_zalloc(sizeof(*key));
+    if (key == NULL)
+        return NULL;
+    if (pqmagic_aigis_sig1_std_keypair(key->pk, key->sk) != 0) {
+        aigis_km_free(key);
+        return NULL;
+    }
+    key->pk_len = AIGIS_SIG1_PK_LEN;
+    key->aigis_len = AIGIS_SIG1_PK_LEN;
+    key->sk_len = AIGIS_SIG1_SK_LEN;
+    key->is_sig = 1;
+    key->is_hybrid = 0;
+    snprintf(key->oid_text, sizeof(key->oid_text), "%s", OID_SIG1);
+    return key;
+}
+
 static const OSSL_DISPATCH aigis_sig_keymgmt[] = {
     { OSSL_FUNC_KEYMGMT_NEW, (void (*)(void))aigis_km_new },
     { OSSL_FUNC_KEYMGMT_FREE, (void (*)(void))aigis_km_free },
@@ -881,7 +1071,28 @@ static const OSSL_DISPATCH aigis_sig_keymgmt[] = {
     { OSSL_FUNC_KEYMGMT_IMPORT, (void (*)(void))aigis_km_import },
     { OSSL_FUNC_KEYMGMT_IMPORT_TYPES, (void (*)(void))aigis_km_import_types },
     { OSSL_FUNC_KEYMGMT_EXPORT, (void (*)(void))aigis_km_export },
-    { OSSL_FUNC_KEYMGMT_EXPORT_TYPES, (void (*)(void))aigis_km_import_types },
+    { OSSL_FUNC_KEYMGMT_EXPORT_TYPES, (void (*)(void))aigis_sig_export_types },
+    { OSSL_FUNC_KEYMGMT_QUERY_OPERATION_NAME,
+      (void (*)(void))aigis_sig_km_query },
+    { OSSL_FUNC_KEYMGMT_GEN_INIT, (void (*)(void))aigis_gen_init },
+    { OSSL_FUNC_KEYMGMT_GEN, (void (*)(void))aigis_sig_gen },
+    { OSSL_FUNC_KEYMGMT_GEN_CLEANUP, (void (*)(void))aigis_gen_cleanup },
+    { 0, NULL }
+};
+
+/* 串联公钥只解码，不在这一把密钥上 genpkey（复合 CSR 用纯 Aigis + SM2 两把钥匙） */
+static const OSSL_DISPATCH aigis_sig_hybrid_keymgmt[] = {
+    { OSSL_FUNC_KEYMGMT_NEW, (void (*)(void))aigis_km_new },
+    { OSSL_FUNC_KEYMGMT_FREE, (void (*)(void))aigis_km_free },
+    { OSSL_FUNC_KEYMGMT_LOAD, (void (*)(void))aigis_km_load },
+    { OSSL_FUNC_KEYMGMT_GET_PARAMS, (void (*)(void))aigis_km_get_params },
+    { OSSL_FUNC_KEYMGMT_GETTABLE_PARAMS,
+      (void (*)(void))aigis_km_gettable_params },
+    { OSSL_FUNC_KEYMGMT_HAS, (void (*)(void))aigis_km_has },
+    { OSSL_FUNC_KEYMGMT_IMPORT, (void (*)(void))aigis_km_import },
+    { OSSL_FUNC_KEYMGMT_IMPORT_TYPES, (void (*)(void))aigis_km_import_types },
+    { OSSL_FUNC_KEYMGMT_EXPORT, (void (*)(void))aigis_km_export },
+    { OSSL_FUNC_KEYMGMT_EXPORT_TYPES, (void (*)(void))aigis_sig_export_types },
     { OSSL_FUNC_KEYMGMT_QUERY_OPERATION_NAME,
       (void (*)(void))aigis_sig_km_query },
     { 0, NULL }
@@ -924,8 +1135,14 @@ static const OSSL_DISPATCH aigis_signature_functions[] = {
       (void (*)(void))aigis_sig_sign_init },
     { OSSL_FUNC_SIGNATURE_DIGEST_SIGN_UPDATE,
       (void (*)(void))aigis_sig_sign_update },
+    { OSSL_FUNC_SIGNATURE_DIGEST_SIGN,
+      (void (*)(void))aigis_sig_digest_sign },
     { OSSL_FUNC_SIGNATURE_DIGEST_SIGN_FINAL,
       (void (*)(void))aigis_sig_sign_final },
+    { OSSL_FUNC_SIGNATURE_GET_CTX_PARAMS,
+      (void (*)(void))aigis_sig_get_ctx_params },
+    { OSSL_FUNC_SIGNATURE_GETTABLE_CTX_PARAMS,
+      (void (*)(void))aigis_sig_gettable_ctx_params_fn },
     { OSSL_FUNC_SIGNATURE_DIGEST_VERIFY_INIT,
       (void (*)(void))aigis_sig_verify_init },
     { OSSL_FUNC_SIGNATURE_DIGEST_VERIFY_UPDATE,
@@ -1099,6 +1316,231 @@ static const OSSL_DISPATCH aigis_text_encoder[] = {
     { 0, NULL }
 };
 
+static int aigis_pubkey_to_spki_der(const struct aigis_key *k,
+                                    unsigned char **out, size_t *outlen)
+{
+    ASN1_OBJECT *oid = NULL;
+    X509_PUBKEY *xpub = NULL;
+    unsigned char *penc = NULL;
+    unsigned char *der = NULL;
+    int len;
+
+    if (k == NULL || k->pk_len == 0 || out == NULL || outlen == NULL)
+        return 0;
+    oid = OBJ_txt2obj(k->oid_text, 1);
+    if (oid == NULL)
+        return 0;
+    xpub = X509_PUBKEY_new();
+    penc = OPENSSL_memdup(k->pk, k->pk_len);
+    if (xpub == NULL || penc == NULL)
+        goto err;
+    /* 与样例 CSR 一致：算法参数为 NULL */
+    if (!X509_PUBKEY_set0_param(xpub, oid, V_ASN1_NULL, NULL, penc,
+                                (int)k->pk_len))
+        goto err;
+    oid = NULL;
+    penc = NULL;
+    len = i2d_X509_PUBKEY(xpub, &der);
+    if (len <= 0)
+        goto err;
+    *out = der;
+    *outlen = (size_t)len;
+    X509_PUBKEY_free(xpub);
+    return 1;
+err:
+    ASN1_OBJECT_free(oid);
+    OPENSSL_free(penc);
+    OPENSSL_free(der);
+    X509_PUBKEY_free(xpub);
+    return 0;
+}
+
+static int aigis_spki_does_selection(void *provctx, int selection)
+{
+    (void)provctx;
+    if (selection == 0)
+        return 1;
+    return (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) != 0;
+}
+
+static int aigis_spki_der_encode(void *vctx, OSSL_CORE_BIO *cout,
+                                 const void *key,
+                                 const OSSL_PARAM *key_abstract, int selection,
+                                 OSSL_PASSPHRASE_CALLBACK *cb, void *cbarg)
+{
+    BIO *bout;
+    const struct aigis_key *k = key;
+    unsigned char *der = NULL;
+    size_t derlen = 0;
+    int ret = 0;
+
+    (void)cb;
+    (void)cbarg;
+    if (key_abstract != NULL)
+        return 0;
+    if ((selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) == 0)
+        return 0;
+    if (!aigis_pubkey_to_spki_der(k, &der, &derlen))
+        return 0;
+    bout = BIO_new_from_core_bio(vctx, cout);
+    if (bout == NULL)
+        goto end;
+    ret = BIO_write(bout, der, (int)derlen) == (int)derlen;
+    BIO_free(bout);
+end:
+    OPENSSL_free(der);
+    return ret;
+}
+
+static const OSSL_DISPATCH aigis_spki_der_encoder[] = {
+    { OSSL_FUNC_ENCODER_NEWCTX, (void (*)(void))text_newctx },
+    { OSSL_FUNC_ENCODER_FREECTX, (void (*)(void))text_freectx },
+    { OSSL_FUNC_ENCODER_DOES_SELECTION,
+      (void (*)(void))aigis_spki_does_selection },
+    { OSSL_FUNC_ENCODER_IMPORT_OBJECT, (void (*)(void))text_import_object },
+    { OSSL_FUNC_ENCODER_FREE_OBJECT, (void (*)(void))aigis_km_free },
+    { OSSL_FUNC_ENCODER_ENCODE, (void (*)(void))aigis_spki_der_encode },
+    { 0, NULL }
+};
+
+static int aigis_sk_to_pkcs8_der(const struct aigis_key *k,
+                                 unsigned char **out, size_t *outlen)
+{
+    PKCS8_PRIV_KEY_INFO *p8 = NULL;
+    ASN1_OBJECT *oid = NULL;
+    unsigned char *raw = NULL;
+    unsigned char *der = NULL;
+    size_t raw_len;
+    int len;
+
+    if (k == NULL || k->sk_len != AIGIS_SIG1_SK_LEN
+        || k->pk_len != AIGIS_SIG1_PK_LEN || k->is_hybrid
+        || out == NULL || outlen == NULL)
+        return 0;
+    raw_len = AIGIS_SIG1_SK_PK_LEN;
+    raw = OPENSSL_malloc(raw_len);
+    oid = OBJ_txt2obj(k->oid_text, 1);
+    p8 = PKCS8_PRIV_KEY_INFO_new();
+    if (raw == NULL || oid == NULL || p8 == NULL)
+        goto err;
+    memcpy(raw, k->sk, AIGIS_SIG1_SK_LEN);
+    memcpy(raw + AIGIS_SIG1_SK_LEN, k->pk, AIGIS_SIG1_PK_LEN);
+    if (!PKCS8_pkey_set0(p8, oid, 0, V_ASN1_UNDEF, NULL, raw, (int)raw_len))
+        goto err;
+    oid = NULL;
+    raw = NULL;
+    len = i2d_PKCS8_PRIV_KEY_INFO(p8, &der);
+    if (len <= 0)
+        goto err;
+    *out = der;
+    *outlen = (size_t)len;
+    PKCS8_PRIV_KEY_INFO_free(p8);
+    return 1;
+err:
+    ASN1_OBJECT_free(oid);
+    OPENSSL_free(raw);
+    OPENSSL_free(der);
+    PKCS8_PRIV_KEY_INFO_free(p8);
+    return 0;
+}
+
+static int aigis_pkcs8_does_selection(void *provctx, int selection)
+{
+    (void)provctx;
+    if (selection == 0)
+        return 1;
+    return (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) != 0;
+}
+
+static int aigis_pkcs8_der_encode(void *vctx, OSSL_CORE_BIO *cout,
+                                  const void *key,
+                                  const OSSL_PARAM *key_abstract, int selection,
+                                  OSSL_PASSPHRASE_CALLBACK *cb, void *cbarg)
+{
+    BIO *bout;
+    const struct aigis_key *k = key;
+    unsigned char *der = NULL;
+    size_t derlen = 0;
+    int ret = 0;
+
+    (void)cb;
+    (void)cbarg;
+    if (key_abstract != NULL)
+        return 0;
+    if ((selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) == 0)
+        return 0;
+    if (!aigis_sk_to_pkcs8_der(k, &der, &derlen))
+        return 0;
+    bout = BIO_new_from_core_bio(vctx, cout);
+    if (bout == NULL)
+        goto end;
+    ret = BIO_write(bout, der, (int)derlen) == (int)derlen;
+    BIO_free(bout);
+end:
+    OPENSSL_free(der);
+    return ret;
+}
+
+static int aigis_pkcs8_pem_encode(void *vctx, OSSL_CORE_BIO *cout,
+                                  const void *key,
+                                  const OSSL_PARAM *key_abstract, int selection,
+                                  OSSL_PASSPHRASE_CALLBACK *cb, void *cbarg)
+{
+    BIO *bout;
+    const struct aigis_key *k = key;
+    unsigned char *der = NULL;
+    size_t derlen = 0;
+    const unsigned char *p;
+    PKCS8_PRIV_KEY_INFO *p8 = NULL;
+    int ret = 0;
+
+    (void)cb;
+    (void)cbarg;
+    if (key_abstract != NULL)
+        return 0;
+    if ((selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) == 0)
+        return 0;
+    if (!aigis_sk_to_pkcs8_der(k, &der, &derlen))
+        return 0;
+    bout = BIO_new_from_core_bio(vctx, cout);
+    if (bout == NULL)
+        goto end;
+    p = der;
+    p8 = d2i_PKCS8_PRIV_KEY_INFO(NULL, &p, (long)derlen);
+    if (p8 == NULL)
+        goto end;
+    ret = PEM_write_bio_PKCS8_PRIV_KEY_INFO(bout, p8);
+    PKCS8_PRIV_KEY_INFO_free(p8);
+    BIO_free(bout);
+    bout = NULL;
+end:
+    BIO_free(bout);
+    OPENSSL_free(der);
+    return ret;
+}
+
+static const OSSL_DISPATCH aigis_pkcs8_der_encoder[] = {
+    { OSSL_FUNC_ENCODER_NEWCTX, (void (*)(void))text_newctx },
+    { OSSL_FUNC_ENCODER_FREECTX, (void (*)(void))text_freectx },
+    { OSSL_FUNC_ENCODER_DOES_SELECTION,
+      (void (*)(void))aigis_pkcs8_does_selection },
+    { OSSL_FUNC_ENCODER_IMPORT_OBJECT, (void (*)(void))text_import_object },
+    { OSSL_FUNC_ENCODER_FREE_OBJECT, (void (*)(void))aigis_km_free },
+    { OSSL_FUNC_ENCODER_ENCODE, (void (*)(void))aigis_pkcs8_der_encode },
+    { 0, NULL }
+};
+
+static const OSSL_DISPATCH aigis_pkcs8_pem_encoder[] = {
+    { OSSL_FUNC_ENCODER_NEWCTX, (void (*)(void))text_newctx },
+    { OSSL_FUNC_ENCODER_FREECTX, (void (*)(void))text_freectx },
+    { OSSL_FUNC_ENCODER_DOES_SELECTION,
+      (void (*)(void))aigis_pkcs8_does_selection },
+    { OSSL_FUNC_ENCODER_IMPORT_OBJECT, (void (*)(void))text_import_object },
+    { OSSL_FUNC_ENCODER_FREE_OBJECT, (void (*)(void))aigis_km_free },
+    { OSSL_FUNC_ENCODER_ENCODE, (void (*)(void))aigis_pkcs8_pem_encode },
+    { 0, NULL }
+};
+
 static void provider_teardown(void *provctx)
 {
     OSSL_LIB_CTX_free(provctx);
@@ -1140,7 +1582,7 @@ static const OSSL_ALGORITHM aigis_keymgmt[] = {
     { "id-Aigis-Enc-1-SPKI:Aigis-Enc-1-SPKI:" OID_ENC1,
       "provider=aigis", aigis_enc_keymgmt },
     { "id-Aigis-SIG1-SM2:Aigis-SIG1-SM2:" OID_SIG1H,
-      "provider=aigis", aigis_sig_keymgmt },
+      "provider=aigis", aigis_sig_hybrid_keymgmt },
     { "id-Aigis-Enc-1-SM2:Aigis-Enc-1-SM2:" OID_ENC1H,
       "provider=aigis", aigis_enc_keymgmt },
     { NULL, NULL, NULL }
@@ -1174,6 +1616,15 @@ static const OSSL_ALGORITHM aigis_decoders[] = {
 };
 
 static const OSSL_ALGORITHM aigis_encoders[] = {
+    { "id-Aigis-SIG1-SPKI:Aigis-SIG1-SPKI:" OID_SIG1,
+      "provider=aigis,output=der,structure=SubjectPublicKeyInfo",
+      aigis_spki_der_encoder },
+    { "id-Aigis-SIG1-SPKI:Aigis-SIG1-SPKI:" OID_SIG1,
+      "provider=aigis,output=der,structure=PrivateKeyInfo",
+      aigis_pkcs8_der_encoder },
+    { "id-Aigis-SIG1-SPKI:Aigis-SIG1-SPKI:" OID_SIG1,
+      "provider=aigis,output=pem,structure=PrivateKeyInfo",
+      aigis_pkcs8_pem_encoder },
     { "id-Aigis-SIG1-SPKI:Aigis-SIG1-SPKI:" OID_SIG1,
       "provider=aigis,output=text", aigis_text_encoder },
     { "id-Aigis-Enc-1-SPKI:Aigis-Enc-1-SPKI:" OID_ENC1,

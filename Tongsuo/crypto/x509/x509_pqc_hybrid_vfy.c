@@ -27,6 +27,9 @@
 #include <openssl/provider.h>
 #include <openssl/evp.h>
 #include <openssl/core_names.h>
+#include <openssl/decoder.h>
+#include <openssl/ec.h>
+#include <openssl/bn.h>
 
 #ifdef _WIN32
 # ifndef TLCP_PQC_ROOT
@@ -837,6 +840,250 @@ int ossl_x509_verify_req_mldsa44_sm2_composite(const X509_REQ *req,
         }
         pqc_info_flush();
     }
+    return ok;
+}
+
+int ossl_x509_is_aigis_sig1_sm2_req(const X509_REQ *req)
+{
+    const X509_ALGOR *alg = NULL;
+    char buf[80];
+
+    if (req == NULL)
+        return 0;
+    X509_REQ_get0_signature(req, NULL, &alg);
+    if (alg == NULL || alg->algorithm == NULL)
+        return 0;
+    if (OBJ_obj2txt(buf, sizeof(buf), alg->algorithm, 1) <= 0)
+        return 0;
+    return strcmp(buf, OSSL_AIGIS_OID_SIG1_SM2_WITH_SM3) == 0;
+}
+
+static int aigis_sig1_sm2_spki_split(const X509_PUBKEY *pub,
+                                     unsigned char *aigis_pk,
+                                     unsigned char *sm2_pk)
+{
+    const unsigned char *pk = NULL;
+    int pklen = 0;
+    X509_ALGOR *alg = NULL;
+    const ASN1_OBJECT *oid = NULL;
+    char buf[80];
+    const int combo = OSSL_PQC_AIGIS_SIG1_PK_LEN + OSSL_PQC_SM2_HYBRID_PK_LEN;
+
+    if (pub == NULL
+            || !X509_PUBKEY_get0_param(NULL, &pk, &pklen, &alg, pub)
+            || pk == NULL || alg == NULL)
+        return 0;
+    X509_ALGOR_get0(&oid, NULL, NULL, alg);
+    if (oid == NULL || OBJ_obj2txt(buf, sizeof(buf), oid, 1) <= 0)
+        return 0;
+    if (strcmp(buf, OSSL_AIGIS_OID_SIG1_SM2_SPKI) != 0)
+        return 0;
+    if (pklen == combo + 1 && pk[0] == 0) {
+        pk++;
+        pklen--;
+    }
+    if (pklen != combo || pk[OSSL_PQC_AIGIS_SIG1_PK_LEN] != 0x04)
+        return 0;
+    memcpy(aigis_pk, pk, OSSL_PQC_AIGIS_SIG1_PK_LEN);
+    memcpy(sm2_pk, pk + OSSL_PQC_AIGIS_SIG1_PK_LEN, OSSL_PQC_SM2_HYBRID_PK_LEN);
+    return 1;
+}
+
+static EVP_PKEY *import_aigis_sig1_raw_pk(OSSL_LIB_CTX *libctx,
+                                          const unsigned char *pk, size_t pklen)
+{
+    X509_PUBKEY *xp = NULL;
+    unsigned char *owned = NULL;
+    unsigned char *der = NULL;
+    int der_len = 0;
+    OSSL_DECODER_CTX *dctx = NULL;
+    EVP_PKEY *pkey = NULL;
+    const unsigned char *p;
+    size_t len;
+
+    if (pklen != OSSL_PQC_AIGIS_SIG1_PK_LEN)
+        return NULL;
+    owned = OPENSSL_memdup(pk, pklen);
+    xp = X509_PUBKEY_new();
+    if (owned == NULL || xp == NULL)
+        goto end;
+    if (!X509_PUBKEY_set0_param(xp, OBJ_txt2obj("1.2.156.10197.1.306.1", 1),
+                                V_ASN1_NULL, NULL, owned, (int)pklen))
+        goto end;
+    owned = NULL;
+    der_len = i2d_X509_PUBKEY(xp, &der);
+    if (der_len <= 0 || der == NULL)
+        goto end;
+    p = der;
+    len = (size_t)der_len;
+    dctx = OSSL_DECODER_CTX_new_for_pkey(&pkey, "DER", "SubjectPublicKeyInfo",
+                                         NULL, OSSL_KEYMGMT_SELECT_PUBLIC_KEY,
+                                         libctx, "provider=aigis");
+    if (dctx == NULL || !OSSL_DECODER_from_data(dctx, &p, &len)) {
+        EVP_PKEY_free(pkey);
+        pkey = NULL;
+    }
+end:
+    OSSL_DECODER_CTX_free(dctx);
+    OPENSSL_free(owned);
+    OPENSSL_free(der);
+    X509_PUBKEY_free(xp);
+    return pkey;
+}
+
+#ifndef OPENSSL_NO_EC
+# define AIGIS_SM2_DEFAULT_ID     "1234567812345678"
+# define AIGIS_SM2_DEFAULT_ID_LEN (sizeof(AIGIS_SM2_DEFAULT_ID) - 1)
+
+static int aigis_sm2_verify_raw(OSSL_LIB_CTX *libctx,
+                                const unsigned char *sm2_pk,
+                                const unsigned char *msg, size_t msglen,
+                                const unsigned char *sig, size_t siglen)
+{
+    EC_GROUP *group = NULL;
+    EC_KEY *ec = NULL;
+    EC_POINT *point = NULL;
+    BIGNUM *x = NULL, *y = NULL;
+    BN_CTX *bn_ctx = NULL;
+    EVP_PKEY *pkey = NULL;
+    EVP_MD_CTX *ctx = NULL;
+    EVP_PKEY_CTX *pctx = NULL;
+    const unsigned char *p = sm2_pk;
+    int ok = 0;
+
+    if (sm2_pk == NULL || sm2_pk[0] != 0x04 || sig == NULL || siglen == 0)
+        return 0;
+    bn_ctx = BN_CTX_new();
+    if (bn_ctx == NULL)
+        return 0;
+    BN_CTX_start(bn_ctx);
+    x = BN_CTX_get(bn_ctx);
+    y = BN_CTX_get(bn_ctx);
+    group = EC_GROUP_new_by_curve_name(NID_sm2);
+    ec = EC_KEY_new();
+    if (x == NULL || y == NULL || group == NULL || ec == NULL
+            || EC_KEY_set_group(ec, group) == 0
+            || BN_bin2bn(p + 1, 32, x) == NULL
+            || BN_bin2bn(p + 33, 32, y) == NULL)
+        goto end;
+    point = EC_POINT_new(group);
+    if (point == NULL
+            || EC_POINT_set_affine_coordinates(group, point, x, y, bn_ctx) == 0
+            || EC_KEY_set_public_key(ec, point) == 0)
+        goto end;
+    pkey = EVP_PKEY_new();
+    if (pkey == NULL || !EVP_PKEY_assign_EC_KEY(pkey, ec))
+        goto end;
+    ec = NULL;
+    ctx = EVP_MD_CTX_new();
+    if (ctx == NULL)
+        goto end;
+    if (!EVP_DigestVerifyInit_ex(ctx, &pctx, "SM3", libctx, NULL, pkey, NULL))
+        goto end;
+    if (EVP_PKEY_CTX_set1_id(pctx, AIGIS_SM2_DEFAULT_ID,
+                             AIGIS_SM2_DEFAULT_ID_LEN) <= 0)
+        goto end;
+    if (!EVP_DigestVerifyUpdate(ctx, msg, msglen))
+        goto end;
+    ok = EVP_DigestVerifyFinal(ctx, sig, siglen) == 1;
+end:
+    EVP_MD_CTX_free(ctx);
+    EVP_PKEY_free(pkey);
+    EC_KEY_free(ec);
+    EC_POINT_free(point);
+    EC_GROUP_free(group);
+    BN_CTX_end(bn_ctx);
+    BN_CTX_free(bn_ctx);
+    return ok;
+}
+#endif
+
+int ossl_x509_verify_req_aigis_sig1_sm2_composite(const X509_REQ *req,
+                                                  OSSL_LIB_CTX *libctx)
+{
+    unsigned char aigis_pk[OSSL_PQC_AIGIS_SIG1_PK_LEN];
+    unsigned char sm2_pk[OSSL_PQC_SM2_HYBRID_PK_LEN];
+    unsigned char *cri = NULL;
+    int crilen = 0;
+    const ASN1_BIT_STRING *sig = NULL;
+    EVP_PKEY *aigis_pub = NULL;
+    EVP_MD_CTX *mctx = NULL;
+    size_t sm2_sig_len;
+    int aigis_ok = 0, sm2_ok = 0, ok = 0;
+
+    if (!ossl_x509_is_aigis_sig1_sm2_req(req))
+        return 0;
+
+    if (pqc_info_enabled()) {
+        FILE *out = pqc_info_stream();
+
+        fprintf(out, "\n[openssl-req-verify Aigis-SIG1-SM2 复合 CSR 双重验签]\n");
+        pqc_print_req_subject_line("  CSR 主体: ", req);
+        fprintf(out,
+                "  [1/2] Aigis-SIG1-with-SM3(完整 CRI，签名前 %d 字节): 验签中 ...\n",
+                OSSL_PQC_AIGIS_SIG1_SIG_LEN);
+        pqc_info_flush();
+    }
+
+    if (!ossl_x509_ensure_pqc_providers(libctx)) {
+        if (pqc_info_enabled()) {
+            fprintf(pqc_info_stream(),
+                    "  [1/2] Aigis: FAIL — 未加载 aigis provider\n");
+            pqc_info_flush();
+        }
+        return 0;
+    }
+    if (!aigis_sig1_sm2_spki_split(X509_REQ_get_X509_PUBKEY((X509_REQ *)req),
+                                   aigis_pk, sm2_pk))
+        goto done;
+
+    aigis_pub = import_aigis_sig1_raw_pk(libctx, aigis_pk, sizeof(aigis_pk));
+    if (aigis_pub == NULL)
+        goto done;
+    crilen = i2d_re_X509_REQ_tbs((X509_REQ *)req, &cri);
+    if (crilen <= 0)
+        goto done;
+    X509_REQ_get0_signature(req, &sig, NULL);
+    if (sig == NULL
+            || (size_t)ASN1_STRING_length(sig) <= OSSL_PQC_AIGIS_SIG1_SIG_LEN)
+        goto done;
+    sm2_sig_len = (size_t)ASN1_STRING_length(sig) - OSSL_PQC_AIGIS_SIG1_SIG_LEN;
+
+    mctx = EVP_MD_CTX_new();
+    if (mctx == NULL)
+        goto done;
+    if (EVP_DigestVerifyInit_ex(mctx, NULL, "SM3", libctx, NULL, aigis_pub,
+                                NULL)
+            && EVP_DigestVerify(mctx, ASN1_STRING_get0_data(sig),
+                                OSSL_PQC_AIGIS_SIG1_SIG_LEN, cri,
+                                (size_t)crilen) == 1)
+        aigis_ok = 1;
+#ifndef OPENSSL_NO_EC
+    if (aigis_ok)
+        sm2_ok = aigis_sm2_verify_raw(libctx, sm2_pk, cri, (size_t)crilen,
+                                      ASN1_STRING_get0_data(sig)
+                                          + OSSL_PQC_AIGIS_SIG1_SIG_LEN,
+                                      sm2_sig_len);
+#endif
+    ok = aigis_ok && sm2_ok;
+
+done:
+    if (pqc_info_enabled()) {
+        FILE *out = pqc_info_stream();
+
+        fprintf(out, "  [1/2] Aigis-SIG1-with-SM3: %s\n",
+                aigis_ok ? "OK" : "FAIL");
+        fprintf(out, "  [2/2] SM2-with-SM3(完整 CRI，签名余下段): %s\n",
+                sm2_ok ? "OK" : "FAIL");
+        if (ok)
+            fprintf(out, "  => 两段签名均有效: Aigis + SM2\n\n");
+        else
+            fprintf(out, "  => 复合 CSR 验签未完成\n\n");
+        pqc_info_flush();
+    }
+    EVP_MD_CTX_free(mctx);
+    EVP_PKEY_free(aigis_pub);
+    OPENSSL_free(cri);
     return ok;
 }
 

@@ -146,7 +146,7 @@ const OPTIONS req_options[] = {
     {"key", OPT_KEY, 's', "Key for signing, and to include unless -in given"},
 #ifndef OPENSSL_NO_SM2
     {"sm2key", OPT_SM2KEY, 's',
-     "SM2 private key for ML-DSA-44-SM2 composite CSR (requires -key ML-DSA-44-SPKI)"},
+     "SM2 private key for composite CSR (requires -key ML-DSA-44-SPKI or Aigis-SIG1-SPKI)"},
 #endif
     {"keyform", OPT_KEYFORM, 'f', "Key file format (ENGINE, other values ignored)"},
     {"pubkey", OPT_PUBKEY, '-', "Output public key"},
@@ -708,7 +708,7 @@ int req_main(int argc, char **argv)
         }
         if (pkey == NULL) {
             BIO_printf(bio_err,
-                       "Must supply -key (ML-DSA-44-SPKI private key) with -sm2key\n");
+                       "Must supply -key (ML-DSA-44-SPKI or Aigis-SIG1-SPKI private key) with -sm2key\n");
             goto end;
         }
         sm2_pkey = load_key(sm2keyfile, keyform, 0, passin, e,
@@ -723,9 +723,11 @@ int req_main(int argc, char **argv)
         }
         ossl_x509_ensure_pqc_providers(app_get0_libctx());
         if (!EVP_PKEY_is_a(pkey, "ML-DSA-44-SPKI")
-                && !EVP_PKEY_is_a(pkey, "id-ML-DSA-44-SPKI")) {
+                && !EVP_PKEY_is_a(pkey, "id-ML-DSA-44-SPKI")
+                && !EVP_PKEY_is_a(pkey, "Aigis-SIG1-SPKI")
+                && !EVP_PKEY_is_a(pkey, "id-Aigis-SIG1-SPKI")) {
             BIO_printf(bio_err,
-                       "-sm2key composite CSR requires -key to be ML-DSA-44-SPKI\n");
+                       "-sm2key composite CSR requires -key to be ML-DSA-44-SPKI or Aigis-SIG1-SPKI\n");
             goto end;
         }
     }
@@ -995,13 +997,21 @@ int req_main(int argc, char **argv)
                 goto end;
             }
             if (sm2_pkey != NULL) {
-                i = ossl_x509_req_sign_mldsa44_sm2_composite(req, pkey, sm2_pkey,
-                                                             app_get0_libctx());
+                if (EVP_PKEY_is_a(pkey, "Aigis-SIG1-SPKI")
+                        || EVP_PKEY_is_a(pkey, "id-Aigis-SIG1-SPKI"))
+                    i = ossl_x509_req_sign_aigis_sig1_sm2_composite(
+                            req, pkey, sm2_pkey, app_get0_libctx());
+                else
+                    i = ossl_x509_req_sign_mldsa44_sm2_composite(
+                            req, pkey, sm2_pkey, app_get0_libctx());
             } else {
                 i = do_X509_REQ_sign(req, pkey, digest, sigopts);
             }
-            if (!i)
+            if (!i) {
+                BIO_printf(bio_err, "Error signing certificate request\n");
+                ERR_print_errors(bio_err);
                 goto end;
+            }
         }
     }
 
@@ -1221,9 +1231,18 @@ static int make_REQ(X509_REQ *req, EVP_PKEY *pkey, EVP_PKEY *sm2_pkey,
         goto err;
 
     if (sm2_pkey != NULL) {
-        if (!ossl_x509_req_set_mldsa44_sm2_pubkey_from_keys(req, pkey, sm2_pkey))
+        if (EVP_PKEY_is_a(pkey, "Aigis-SIG1-SPKI")
+                || EVP_PKEY_is_a(pkey, "id-Aigis-SIG1-SPKI")) {
+            if (!ossl_x509_req_set_aigis_sig1_sm2_pubkey_from_keys(req, pkey,
+                                                                   sm2_pkey))
+                goto err;
+        } else if (!ossl_x509_req_set_mldsa44_sm2_pubkey_from_keys(req, pkey,
+                                                                   sm2_pkey)) {
             goto err;
+        }
     } else if (!X509_REQ_set_pubkey(req, pkey)) {
+        BIO_printf(bio_err, "Error setting public key in certificate request\n");
+        ERR_print_errors(bio_err);
         goto err;
     }
 

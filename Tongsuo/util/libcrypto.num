@@ -5745,3 +5745,5 @@ ossl_x509_hybrid_load_sm2_private_key_file ?	3_0_3	EXIST::FUNCTION:
 ossl_x509_hybrid_security_sigbits         ?	3_0_3	EXIST::FUNCTION:
 ossl_x509_req_set_mldsa44_sm2_pubkey_from_keys ?	3_0_3	EXIST::FUNCTION:
 ossl_x509_req_sign_mldsa44_sm2_composite       ?	3_0_3	EXIST::FUNCTION:
+ossl_x509_req_set_aigis_sig1_sm2_pubkey_from_keys ?	3_0_3	EXIST::FUNCTION:
+ossl_x509_req_sign_aigis_sig1_sm2_composite       ?	3_0_3	EXIST::FUNCTION:

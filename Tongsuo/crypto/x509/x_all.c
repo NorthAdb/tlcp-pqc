@@ -53,6 +53,8 @@ int X509_REQ_verify_ex(X509_REQ *a, EVP_PKEY *r, OSSL_LIB_CTX *libctx,
 {
     if (ossl_x509_is_mldsa44_sm2_req(a))
         return ossl_x509_verify_req_mldsa44_sm2_composite(a, libctx) ? 1 : 0;
+    if (ossl_x509_is_aigis_sig1_sm2_req(a))
+        return ossl_x509_verify_req_aigis_sig1_sm2_composite(a, libctx) ? 1 : 0;
 
     return ASN1_item_verify_ex(ASN1_ITEM_rptr(X509_REQ_INFO), &a->sig_alg,
                                a->signature, &a->req_info, a->distinguishing_id,
@@ -69,6 +71,10 @@ int X509_REQ_verify_ctx(X509_REQ *a, EVP_MD_CTX *ctx)
     if (ossl_x509_is_mldsa44_sm2_req(a)) {
         (void)ctx;
         return ossl_x509_verify_req_mldsa44_sm2_composite(a, NULL) ? 1 : 0;
+    }
+    if (ossl_x509_is_aigis_sig1_sm2_req(a)) {
+        (void)ctx;
+        return ossl_x509_verify_req_aigis_sig1_sm2_composite(a, NULL) ? 1 : 0;
     }
 
     return ASN1_item_verify_ctx(ASN1_ITEM_rptr(X509_REQ_INFO), &a->sig_alg,

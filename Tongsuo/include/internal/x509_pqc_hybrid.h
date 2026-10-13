@@ -16,6 +16,7 @@
 # define OSSL_PQC_MLKEM512_SK_LEN  1632
 # define OSSL_PQC_SM2_HYBRID_PK_LEN 65
 # define OSSL_PQC_AIGIS_SIG1_SIG_LEN 1852
+# define OSSL_PQC_AIGIS_SIG1_PK_LEN  1056
 
 # define OSSL_AIGIS_OID_SIG1_SM2_WITH_SM3 "1.2.156.10197.1.510.1"
 # define OSSL_AIGIS_OID_SIG1_WITH_SM3    "1.2.156.10197.1.509.1"
@@ -81,6 +82,9 @@ static ossl_inline int ossl_x509_is_mldsa44_sm2_req(const X509_REQ *req)
         && X509_REQ_get_signature_nid(req) == NID_ML_DSA_44_SM2_with_SM3;
 }
 
+/* Aigis 串联 CSR：签名 OID 510.1。NID 由 provider 动态注册，用 OID 文本比较。 */
+int ossl_x509_is_aigis_sig1_sm2_req(const X509_REQ *req);
+
 /*
  * certs/2 CSR：跳过标准 X509_REQ_verify，由 cert_verify 做 ML-DSA+SM2 复合自签验签。
  */
@@ -101,6 +105,20 @@ int ossl_x509_req_sign_mldsa44_sm2_composite(X509_REQ *req,
                                              EVP_PKEY *mldsa_pkey,
                                              EVP_PKEY *sm2_pkey,
                                              OSSL_LIB_CTX *libctx);
+
+/*
+ * Aigis 串联 CSR：-key id-Aigis-SIG1-SPKI + -sm2key SM2。
+ * 公钥 OID 512.1（1056‖65），签名 OID 510.1（1852‖SM2）。
+ */
+int ossl_x509_req_set_aigis_sig1_sm2_pubkey_from_keys(X509_REQ *req,
+                                                      EVP_PKEY *aigis_pkey,
+                                                      EVP_PKEY *sm2_pkey);
+int ossl_x509_req_sign_aigis_sig1_sm2_composite(X509_REQ *req,
+                                                EVP_PKEY *aigis_pkey,
+                                                EVP_PKEY *sm2_pkey,
+                                                OSSL_LIB_CTX *libctx);
+int ossl_x509_verify_req_aigis_sig1_sm2_composite(const X509_REQ *req,
+                                                  OSSL_LIB_CTX *libctx);
 
 /*
  * certs/3：标准 SM2 外层通过后追加 ML-DSA（扩展 4.1.8）；非混合证返回 1。
